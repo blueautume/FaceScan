@@ -10,6 +10,8 @@ struct LivePointCloudView: UIViewRepresentable {
     var poseStore: LiveFacePoseStore? = nil
     var followsFacePose = false
     var surfaceMesh: ScanMesh? = nil
+    /// Original and filtered geometry share this identity to keep comparison framing stable.
+    var resultFramingIdentity: UUID? = nil
     var displayStyle: MeshDisplayStyle = .points
     var animatesAcquisition = false
 
@@ -30,6 +32,7 @@ struct LivePointCloudView: UIViewRepresentable {
         context.coordinator.install(in: view)
         context.coordinator.update(snapshot: snapshot, poseStore: poseStore,
                                    followsFacePose: followsFacePose, surfaceMesh: surfaceMesh,
+                                   resultFramingIdentity: resultFramingIdentity,
                                    displayStyle: displayStyle, animatesAcquisition: animatesAcquisition,
                                    in: view)
         return view
@@ -38,6 +41,7 @@ struct LivePointCloudView: UIViewRepresentable {
     func updateUIView(_ uiView: SCNView, context: Context) {
         context.coordinator.update(snapshot: snapshot, poseStore: poseStore,
                                    followsFacePose: followsFacePose, surfaceMesh: surfaceMesh,
+                                   resultFramingIdentity: resultFramingIdentity,
                                    displayStyle: displayStyle, animatesAcquisition: animatesAcquisition,
                                    in: uiView)
     }
@@ -61,6 +65,7 @@ struct LivePointCloudView: UIViewRepresentable {
         private var isFollowingFacePose = false
         private var isAcquiring = false
         private var hasPresentedResult = false
+        private var requestedResultFramingIdentity: UUID?
         private var flight: PointCloudFlight?
 
         private struct RenderContent: Equatable {
@@ -106,6 +111,7 @@ struct LivePointCloudView: UIViewRepresentable {
 
         func update(snapshot: LivePointCloudSnapshot?, poseStore: LiveFacePoseStore? = nil,
                     followsFacePose: Bool = false, surfaceMesh: ScanMesh? = nil,
+                    resultFramingIdentity: UUID? = nil,
                     displayStyle: MeshDisplayStyle = .points,
                     animatesAcquisition: Bool = false, in view: SCNView) {
             let isFollowing = followsFacePose && poseStore != nil
@@ -115,13 +121,18 @@ struct LivePointCloudView: UIViewRepresentable {
                 // if the previous finished scan was manually orbited.
                 pointNode.simdTransform = matrix_identity_float4x4
                 hasPresentedResult = false
+                requestedResultFramingIdentity = nil
                 resetCamera(in: view)
             }
             isFollowingFacePose = isFollowing
             (view as? LivePointCloudSceneView)?.configurePoseTracking(
                 store: poseStore, followsFacePose: isFollowing)
             view.allowsCameraControl = !isFollowing
-            if let snapshot {
+            if let surfaceMesh {
+                let source = surfaceMesh.isSample ? "合成示例" : "扫描结果"
+                let processing = surfaceMesh.isFiltered ? "滤波后点云" : "原始点云"
+                view.accessibilityLabel = "\(source)，\(processing)，\(surfaceMesh.vertexCount) 个点，可旋转和缩放"
+            } else if let snapshot {
                 let source = snapshot.isSample ? "合成示例实时点云" : "实时扫描点云"
                 let interaction = isFollowing ? "随头部移动" : "可旋转和缩放"
                 view.accessibilityLabel = "\(source)，\(snapshot.pointCount) 个点，\(interaction)"
@@ -142,6 +153,7 @@ struct LivePointCloudView: UIViewRepresentable {
                 requestedContent = nil
                 renderedContent = nil
                 preparedGeometry = nil
+                requestedResultFramingIdentity = nil
                 if hasPresentedResult {
                     pointNode.simdTransform = matrix_identity_float4x4
                     resetCamera(in: view)
@@ -162,6 +174,7 @@ struct LivePointCloudView: UIViewRepresentable {
                 preparedGeometry = nil
                 preparedCenter = nil
                 hasPresentedResult = false
+                requestedResultFramingIdentity = nil
                 pointNode.geometry = nil
                 pointNode.simdTransform = matrix_identity_float4x4
                 resetCamera(in: view)
@@ -171,6 +184,13 @@ struct LivePointCloudView: UIViewRepresentable {
 
             let content = RenderContent(snapshot: snapshot, mesh: surfaceMesh)
             let presentsResult = surfaceMesh != nil && !animatesAcquisition && !isFollowing
+            if let surfaceMesh {
+                let framingIdentity = resultFramingIdentity ?? surfaceMesh.renderIdentity
+                if framingIdentity != requestedResultFramingIdentity {
+                    hasPresentedResult = false
+                }
+                requestedResultFramingIdentity = framingIdentity
+            }
             if content == renderedContent {
                 requestedContent = content
                 presentPreparedGeometry(in: view, presentsResult: presentsResult)
@@ -178,9 +198,6 @@ struct LivePointCloudView: UIViewRepresentable {
             }
             // Style changes while data is preparing only change selectedStyle.
             guard content != requestedContent else { return }
-            if surfaceMesh != nil, content.meshIdentity != requestedContent?.meshIdentity {
-                hasPresentedResult = false
-            }
             requestedContent = content
             let input = PointCloudRenderPipeline.Input(
                 vertices: surfaceMesh?.vertices ?? snapshot?.vertices ?? [],

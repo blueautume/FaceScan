@@ -81,14 +81,16 @@ enum ScanExporter {
               }) else { throw ExportError.invalidGeometry }
         try Task.checkCancellation()
         let kind = mesh.isSample ? "sample" : "truedepth"
-        let filename = "FaceScan-\(kind)-\(UUID().uuidString.prefix(8)).ply"
+        let variant = mesh.isFiltered ? "-filtered" : ""
+        let filename = "FaceScan-\(kind)\(variant)-\(UUID().uuidString.prefix(8)).ply"
         let directory = temporaryExportDirectory
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let url = directory.appendingPathComponent(filename)
         let header = """
         ply
         format ascii 1.0
-        comment FaceScan \(mesh.isSample ? "synthetic sample - not a real scan" : "TrueDepth measured surface")
+        comment FaceScan \(mesh.isSample ? "synthetic sample - not a real scan" : (mesh.isFiltered ? "TrueDepth filtered point cloud - modified geometry" : "TrueDepth measured surface"))
+        comment processing \(mesh.isFiltered ? "FacePointCloudProcessor reference - geometry and RGB filtered, display only" : "original")
         comment coordinate_units meters
         comment coordinate_frame ARFaceAnchor local, +Y up, +Z face forward
         comment accepted_depth_frames \(mesh.frameCount)

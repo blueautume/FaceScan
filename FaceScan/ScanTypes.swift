@@ -19,15 +19,17 @@ struct ScanMesh: Sendable {
     var frameCount: Int
     var coveredAngles: Set<ScanAngle>
     var isSample: Bool = false
+    var isFiltered: Bool = false
 
     init(vertices: [ScanVertex], triangleIndices: [UInt32], frameCount: Int,
-         coveredAngles: Set<ScanAngle>, isSample: Bool = false) {
+         coveredAngles: Set<ScanAngle>, isSample: Bool = false, isFiltered: Bool = false) {
         renderIdentity = UUID()
         self.vertices = vertices
         self.triangleIndices = triangleIndices
         self.frameCount = frameCount
         self.coveredAngles = coveredAngles
         self.isSample = isSample
+        self.isFiltered = isFiltered
     }
 
     var vertexCount: Int { vertices.count }

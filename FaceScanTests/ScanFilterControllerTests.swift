@@ -1,0 +1,204 @@
+import Foundation
+import XCTest
+@testable import FaceScan
+
+final class ScanFilterControllerTests: XCTestCase {
+    @MainActor
+    func testSuccessShowsFilteredCopyAndCanSwitchBackWithoutReprocessing() async throws {
+        let source = sourceMesh()
+        let originalPositions = source.vertices.map(\.position)
+        let output = filteredResult(from: source)
+        let gate = FilterWorkerGate()
+        let controller = ScanFilterController { mesh in try await gate.process(mesh) }
+
+        controller.start(source)
+        XCTAssertTrue(controller.isFiltering)
+        XCTAssertEqual(controller.displayedMesh(for: source).renderIdentity, source.renderIdentity)
+        await gate.waitForRequest(source.renderIdentity)
+        controller.start(source)
+        await gate.succeed(source.renderIdentity, with: output)
+        await controller.waitUntilFinished()
+
+        XCTAssertFalse(controller.isFiltering)
+        XCTAssertTrue(controller.showsFiltered)
+        XCTAssertNil(controller.errorMessage)
+        XCTAssertEqual(controller.displayedMesh(for: source).renderIdentity, output.mesh.renderIdentity)
+        XCTAssertEqual(source.vertices.map(\.position), originalPositions)
+        XCTAssertEqual(source.triangleIndices, [0, 1, 2])
+        XCTAssertFalse(source.isFiltered)
+
+        controller.showsFiltered = false
+        XCTAssertEqual(controller.displayedMesh(for: source).renderIdentity, source.renderIdentity)
+        controller.start(source)
+        XCTAssertTrue(controller.showsFiltered)
+        XCTAssertEqual(controller.displayedMesh(for: source).renderIdentity, output.mesh.renderIdentity)
+        let count = await gate.requestCount
+        XCTAssertEqual(count, 1, "Repeated taps and showing the cached result must not filter twice.")
+    }
+
+    @MainActor
+    func testResultNeverAppliesToAnotherScanOrChangedGeometry() async throws {
+        let source = sourceMesh()
+        let output = filteredResult(from: source)
+        let controller = ScanFilterController { _ in output }
+        controller.start(source)
+        await controller.waitUntilFinished()
+
+        let anotherScan = sourceMesh()
+        XCTAssertNil(controller.result(for: anotherScan))
+        XCTAssertEqual(controller.displayedMesh(for: anotherScan).renderIdentity, anotherScan.renderIdentity)
+        var changedSource = source
+        changedSource.vertices[0].position.z += 0.01
+        XCTAssertNil(controller.result(for: changedSource))
+        XCTAssertEqual(controller.displayedMesh(for: changedSource).renderIdentity, changedSource.renderIdentity)
+    }
+
+    @MainActor
+    func testResetDiscardsLateNonCooperativeWorkerAndAllowsNewScan() async throws {
+        let source = sourceMesh()
+        let gate = FilterWorkerGate()
+        let controller = ScanFilterController { mesh in try await gate.process(mesh) }
+        controller.start(source)
+        await gate.waitForRequest(source.renderIdentity)
+        let oldCompletion = await completionOfCurrentWork(controller)
+
+        controller.reset()
+        XCTAssertFalse(controller.isFiltering)
+        XCTAssertNil(controller.result)
+        let nextSource = sourceMesh()
+        let nextOutput = filteredResult(from: nextSource)
+        controller.start(nextSource)
+        await gate.waitForRequest(nextSource.renderIdentity)
+
+        // This worker deliberately ignores cancellation and returns after reset.
+        await gate.succeed(source.renderIdentity, with: filteredResult(from: source))
+        await oldCompletion.value
+        XCTAssertTrue(controller.isFiltering, "An old completion must not clear a new scan's busy state.")
+        XCTAssertNil(controller.result)
+        XCTAssertEqual(controller.displayedMesh(for: nextSource).renderIdentity, nextSource.renderIdentity)
+
+        await gate.succeed(nextSource.renderIdentity, with: nextOutput)
+        await controller.waitUntilFinished()
+        XCTAssertEqual(controller.result(for: nextSource)?.mesh.renderIdentity, nextOutput.mesh.renderIdentity)
+        XCTAssertNil(controller.result(for: source))
+    }
+
+    @MainActor
+    func testCancelDiscardsLateOutputAndKeepsCompletedComparison() async throws {
+        let source = sourceMesh()
+        let gate = FilterWorkerGate()
+        let controller = ScanFilterController { mesh in try await gate.process(mesh) }
+        controller.start(source)
+        await gate.waitForRequest(source.renderIdentity)
+        let completion = await completionOfCurrentWork(controller)
+        controller.cancel()
+        XCTAssertFalse(controller.isFiltering)
+        await gate.succeed(source.renderIdentity, with: filteredResult(from: source))
+        await completion.value
+        XCTAssertNil(controller.result)
+        XCTAssertNil(controller.errorMessage)
+        XCTAssertEqual(controller.displayedMesh(for: source).renderIdentity, source.renderIdentity)
+
+        controller.start(source)
+        await gate.waitForRequest(source.renderIdentity)
+        let output = filteredResult(from: source)
+        await gate.succeed(source.renderIdentity, with: output)
+        await controller.waitUntilFinished()
+        controller.cancel()
+        XCTAssertEqual(controller.result(for: source)?.mesh.renderIdentity, output.mesh.renderIdentity)
+        XCTAssertEqual(controller.displayedMesh(for: source).renderIdentity, output.mesh.renderIdentity)
+    }
+
+    @MainActor
+    func testFailurePreservesOriginalAndRetryCanSucceed() async throws {
+        let source = sourceMesh()
+        let gate = FilterWorkerGate()
+        let controller = ScanFilterController { mesh in try await gate.process(mesh) }
+        controller.start(source)
+        await gate.waitForRequest(source.renderIdentity)
+        await gate.fail(source.renderIdentity)
+        await controller.waitUntilFinished()
+
+        XCTAssertFalse(controller.isFiltering)
+        XCTAssertEqual(controller.errorMessage, "Test processing failure")
+        XCTAssertNil(controller.result)
+        XCTAssertEqual(controller.displayedMesh(for: source).renderIdentity, source.renderIdentity)
+
+        controller.start(source)
+        XCTAssertNil(controller.errorMessage)
+        await gate.waitForRequest(source.renderIdentity)
+        let output = filteredResult(from: source)
+        await gate.succeed(source.renderIdentity, with: output)
+        await controller.waitUntilFinished()
+        XCTAssertEqual(controller.displayedMesh(for: source).renderIdentity, output.mesh.renderIdentity)
+        XCTAssertNil(controller.errorMessage)
+    }
+
+    @MainActor
+    private func completionOfCurrentWork(_ controller: ScanFilterController) async -> Task<Void, Never> {
+        let entered = expectation(description: "Completion waiter captured the current task")
+        let completion = Task { @MainActor in
+            entered.fulfill()
+            // No actor hop occurs here: the current task is captured before this
+            // main-actor closure yields, allowing reset/cancel to run afterwards.
+            await controller.waitUntilFinished()
+        }
+        await fulfillment(of: [entered], timeout: 2)
+        return completion
+    }
+
+    private func sourceMesh() -> ScanMesh {
+        ScanMesh(vertices: [
+            ScanVertex(position: SIMD3(-0.02, 0.01, 0.04), color: SIMD3(0.4, 0.5, 0.6)),
+            ScanVertex(position: SIMD3(0.02, 0.01, 0.04), color: SIMD3(0.5, 0.6, 0.7)),
+            ScanVertex(position: SIMD3(0, -0.02, 0.05), color: SIMD3(0.6, 0.7, 0.8))
+        ], triangleIndices: [0, 1, 2], frameCount: 8, coveredAngles: [.center, .left])
+    }
+
+    private func filteredResult(from source: ScanMesh) -> ScanFilterResult {
+        var vertices = source.vertices
+        vertices[0].position.z += 0.001
+        let mesh = ScanMesh(vertices: vertices, triangleIndices: [], frameCount: source.frameCount,
+                            coveredAngles: source.coveredAngles, isSample: source.isSample,
+                            isFiltered: true)
+        let statistics = FaceCloudStatistics(inputCount: source.vertexCount, outputCount: mesh.vertexCount,
+            sorRejectedCount: 0, modelRejectedCount: 0, sorDistanceThresholdMM: 2,
+            medianDisplacementMM: 0.1, p95DisplacementMM: 1, maximumDisplacementMM: 1,
+            observedGridCells: 3, elapsedSeconds: 0.01)
+        return ScanFilterResult(mesh: mesh, statistics: statistics)
+    }
+}
+
+/// The gate intentionally does not observe task cancellation, so tests prove
+/// controller generation checks independently of a cooperative CPU worker.
+private actor FilterWorkerGate {
+    private var pending: [UUID: CheckedContinuation<ScanFilterResult, Error>] = [:]
+    private var requestWaiters: [UUID: [CheckedContinuation<Void, Never>]] = [:]
+    private(set) var requestCount = 0
+
+    func process(_ mesh: ScanMesh) async throws -> ScanFilterResult {
+        try await withCheckedThrowingContinuation { continuation in
+            requestCount += 1
+            pending[mesh.renderIdentity] = continuation
+            requestWaiters.removeValue(forKey: mesh.renderIdentity)?.forEach { $0.resume() }
+        }
+    }
+
+    func waitForRequest(_ identity: UUID) async {
+        guard pending[identity] == nil else { return }
+        await withCheckedContinuation { requestWaiters[identity, default: []].append($0) }
+    }
+
+    func succeed(_ identity: UUID, with result: ScanFilterResult) {
+        pending.removeValue(forKey: identity)!.resume(returning: result)
+    }
+
+    func fail(_ identity: UUID) {
+        pending.removeValue(forKey: identity)!.resume(throwing: WorkerFailure.requested)
+    }
+
+    private enum WorkerFailure: LocalizedError {
+        case requested
+        var errorDescription: String? { "Test processing failure" }
+    }
+}

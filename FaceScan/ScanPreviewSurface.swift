@@ -15,6 +15,7 @@ struct ScanPreviewSurface: View {
     var poseStore: LiveFacePoseStore? = nil
     var followsFacePose = false
     var surfaceMesh: ScanMesh? = nil
+    var resultFramingIdentity: UUID? = nil
     var displayStyle: MeshDisplayStyle = .points
     var animatesAcquisition = false
 
@@ -23,7 +24,9 @@ struct ScanPreviewSurface: View {
             ZStack(alignment: .topLeading) {
                 LivePointCloudView(snapshot: snapshot, poseStore: poseStore,
                                    followsFacePose: followsFacePose,
-                                   surfaceMesh: surfaceMesh, displayStyle: displayStyle,
+                                   surfaceMesh: surfaceMesh,
+                                   resultFramingIdentity: resultFramingIdentity,
+                                   displayStyle: displayStyle,
                                    animatesAcquisition: animatesAcquisition)
                     .frame(width: showsPointCloud ? geometry.size.width : 130,
                            height: showsPointCloud ? geometry.size.height : 155)

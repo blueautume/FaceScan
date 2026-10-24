@@ -4,6 +4,7 @@ import SwiftUI
 struct ContentView: View {
     @StateObject private var privacy: PrivacyConsentStore
     @StateObject private var scanner: FaceScanController
+    @StateObject private var scanFilter = ScanFilterController()
     @Environment(\.scenePhase) private var scenePhase
     @State private var showsPrivacy = false
     @State private var exporting = false
@@ -35,7 +36,9 @@ struct ContentView: View {
         _scanner = StateObject(wrappedValue: FaceScanController(privacyConsent: consent))
     }
 
-    private var mesh: ScanMesh? { sampleMesh ?? scanner.result }
+    private var originalMesh: ScanMesh? { sampleMesh ?? scanner.result }
+    private var mesh: ScanMesh? { originalMesh.map { scanFilter.displayedMesh(for: $0) } }
+    private var filteredResult: ScanFilterResult? { originalMesh.flatMap { scanFilter.result(for: $0) } }
     private var isScanning: Bool { scanner.phase == .scanning || scanner.phase == .processing }
     private var showsPoints: Bool { isScanning || mesh != nil || showsLiveSample }
     private var snapshot: LivePointCloudSnapshot? {
@@ -58,6 +61,7 @@ struct ContentView: View {
                 Spacer()
                 Button {
                     wantsToScan = false
+                    scanFilter.cancel()
                     scanner.suspendCaptureForFileViewing()
                     pickerGeneration = UUID()
                     choosingFile = true
@@ -133,6 +137,8 @@ struct ContentView: View {
                 wantsToScan = false
             }
         }
+        .onChange(of: scanFilter.showsFiltered) { _, _ in savedNotice = false }
+        .onChange(of: scanFilter.result?.mesh.renderIdentity) { _, _ in savedNotice = false }
         .onOpenURL { url in openFile(url) }
         .fileImporter(isPresented: $choosingFile,
                       allowedContentTypes: [PLYFileType.type], allowsMultipleSelection: false) { result in
@@ -173,11 +179,12 @@ struct ContentView: View {
                 try? await Task.sleep(for: .milliseconds(180))
             }
         }
-        .alert(errorTitle, isPresented: Binding(
-            get: { exportError != nil }, set: { if !$0 { exportError = nil } }
+        .alert(scanFilter.errorMessage == nil ? errorTitle : "无法滤波", isPresented: Binding(
+            get: { exportError != nil || scanFilter.errorMessage != nil },
+            set: { if !$0 { exportError = nil; scanFilter.errorMessage = nil } }
         )) {
-            Button("好", role: .cancel) { exportError = nil }
-        } message: { Text(exportError ?? "请重试。") }
+            Button("好", role: .cancel) { exportError = nil; scanFilter.errorMessage = nil }
+        } message: { Text(scanFilter.errorMessage ?? exportError ?? "请重试。") }
     }
 
     private var stage: some View {
@@ -192,6 +199,7 @@ struct ContentView: View {
                 poseStore: scanner.livePose,
                 followsFacePose: scanner.phase == .scanning,
                 surfaceMesh: mesh,
+                resultFramingIdentity: originalMesh?.renderIdentity,
                 displayStyle: mesh == nil ? .points : resultStyle,
                 animatesAcquisition: scanner.phase == .scanning || showsLiveSample)
                 .opacity(importedDocument == nil && !openingFile ? 1 : 0)
@@ -268,7 +276,11 @@ struct ContentView: View {
         if let importedDocument {
             return importedDocument.mesh.isSample ? "合成示例 · PLY 点云" : "PLY 点云"
         }
-        if sampleMesh != nil || showsLiveSample { return "合成示例 · 非真实扫描" }
+        if sampleMesh != nil || showsLiveSample {
+            return mesh?.isFiltered == true ? "合成示例 · 滤波后 · 非真实扫描" : "合成示例 · 非真实扫描"
+        }
+        if mesh?.isFiltered == true { return "滤波后 · 观感预览" }
+        if filteredResult != nil { return "原始扫描" }
         if mesh != nil { return "扫描完成" }
         if isScanning { return "实时点云" }
         return ""
@@ -300,10 +312,44 @@ struct ContentView: View {
                 .pickerStyle(.segmented)
                 .labelsHidden()
                 .accessibilityLabel("显示方式")
-                primaryButton(exporting ? "正在导出…" : "导出 PLY", symbol: "square.and.arrow.up") {
-                    export(mesh)
+
+                if let filteredResult {
+                    Picker("结果对比", selection: $scanFilter.showsFiltered) {
+                        Text("原始").tag(false)
+                        Text("滤波后").tag(true)
+                    }
+                    .pickerStyle(.segmented)
+                    .disabled(exporting)
+                    Text("\(filteredResult.statistics.inputCount) 点 → \(filteredResult.statistics.outputCount) 点 · \(filteredResult.statistics.elapsedSeconds, specifier: "%.1f") 秒")
+                        .font(.system(size: 12))
+                        .monospacedDigit()
+                        .foregroundStyle(ScanTheme.secondary)
+                        .accessibilityLabel("原始 \(filteredResult.statistics.inputCount) 点，滤波后 \(filteredResult.statistics.outputCount) 点，耗时 \(filteredResult.statistics.elapsedSeconds, specifier: "%.1f") 秒")
                 }
-                .disabled(exporting)
+
+                if scanFilter.isFiltering {
+                    HStack {
+                        ProgressView("正在滤波…")
+                        Spacer()
+                        Button("取消") { scanFilter.cancel() }
+                    }
+                    .font(.system(size: 13))
+                    .foregroundStyle(ScanTheme.secondary)
+                }
+
+                HStack(spacing: 12) {
+                    if filteredResult == nil {
+                        primaryButton("滤波", symbol: "camera.filters") {
+                            if let originalMesh { scanFilter.start(originalMesh) }
+                        }
+                        .disabled(exporting || scanFilter.isFiltering)
+                    }
+                    primaryButton(exporting ? "正在导出…" : (mesh.isFiltered ? "导出滤波 PLY" : "导出 PLY"),
+                                  symbol: "square.and.arrow.up") {
+                        export(mesh)
+                    }
+                    .disabled(exporting || scanFilter.isFiltering)
+                }
                 Button("重新扫描", action: restart)
                     .font(.system(size: 14, weight: .medium))
                     .foregroundStyle(ScanTheme.secondary)
@@ -356,6 +402,7 @@ struct ContentView: View {
 
     private func beginScan() {
         guard privacy.isAccepted else { showsPrivacy = true; return }
+        scanFilter.reset()
         resultStyle = .points
         hasEnteredCapture = true
         wantsToScan = true
@@ -370,6 +417,7 @@ struct ContentView: View {
     }
 
     private func restart() {
+        scanFilter.reset()
         resultStyle = .points
         hasEnteredCapture = true
         wantsToScan = false
@@ -382,6 +430,7 @@ struct ContentView: View {
     }
 
     private func revokeConsent() {
+        scanFilter.reset()
         resultStyle = .points
         privacy.revoke()
         scanner.stop()
@@ -446,6 +495,7 @@ struct ContentView: View {
     }
 
     private func openFile(_ url: URL) {
+        scanFilter.cancel()
         pickerGeneration = UUID()
         choosingFile = false
         wantsToScan = false

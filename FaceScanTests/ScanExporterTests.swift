@@ -43,6 +43,24 @@ final class ScanExporterTests: XCTestCase {
         XCTAssertFalse(text.contains("TrueDepth measured surface"))
     }
 
+    func testFilteredPointCloudExportIdentifiesModifiedGeometryAndHasNoFaces() throws {
+        var mesh = triangleFixture()
+        mesh.isFiltered = true
+        mesh.triangleIndices = []
+        let url = try ScanExporter.export(mesh)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let text = try String(contentsOf: url, encoding: .utf8)
+
+        XCTAssertTrue(url.lastPathComponent.contains("truedepth-filtered-"))
+        XCTAssertTrue(text.contains("TrueDepth filtered point cloud - modified geometry"))
+        XCTAssertTrue(text.contains("comment processing FacePointCloudProcessor reference - geometry and RGB filtered, display only\n"))
+        XCTAssertFalse(text.contains("TrueDepth measured surface"))
+        XCTAssertTrue(text.contains("element face 0\n"))
+        XCTAssertTrue(text.contains("comment accepted_depth_frames 8\n"))
+        XCTAssertEqual(text.components(separatedBy: "end_header\n").last?.split(separator: "\n").count,
+                       mesh.vertexCount)
+    }
+
     func testEmptyMeshIsRejected() {
         let mesh = ScanMesh(vertices: [], triangleIndices: [], frameCount: 0, coveredAngles: [])
         XCTAssertThrowsError(try ScanExporter.export(mesh)) { error in
