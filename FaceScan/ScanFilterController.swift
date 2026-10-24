@@ -5,7 +5,7 @@ import Foundation
 /// superseded worker can never publish its result into a later scan.
 @MainActor
 final class ScanFilterController: ObservableObject {
-    typealias Processor = @Sendable (ScanMesh) async throws -> ScanFilterResult
+    typealias Processor = @Sendable (ScanMesh, ScanFilterSettings) async throws -> ScanFilterResult
 
     @Published private(set) var result: ScanFilterResult?
     @Published private(set) var isFiltering = false
@@ -17,7 +17,7 @@ final class ScanFilterController: ObservableObject {
     private var task: Task<Void, Never>?
     private let processor: Processor
 
-    init(processor: @escaping Processor = { try await ScanPointCloudFilter.processAsync($0) }) {
+    init(processor: @escaping Processor = { try await ScanPointCloudFilter.processAsync($0, settings: $1) }) {
         self.processor = processor
     }
 
@@ -31,22 +31,25 @@ final class ScanFilterController: ObservableObject {
         showsFiltered ? result(for: source)?.mesh ?? source : source
     }
 
-    func start(_ source: ScanMesh) {
+    func start(_ source: ScanMesh, settings: ScanFilterSettings = .reference) {
         guard !isFiltering, !source.isFiltered else { return }
-        if result(for: source) != nil {
+        if result(for: source)?.settings == settings {
+            errorMessage = nil
             showsFiltered = true
             return
         }
-        reset()
+        if sourceIdentity != source.renderIdentity { reset() }
+        else { cancel() }
+        errorMessage = nil
         sourceIdentity = source.renderIdentity
         isFiltering = true
         let token = generation
         let process = processor
         task = Task { [weak self] in
             do {
-                let output = try await process(source)
+                let output = try await process(source, settings)
                 guard !Task.isCancelled, let self, self.generation == token else { return }
-                self.result = output
+                self.result = ScanFilterResult(mesh: output.mesh, statistics: output.statistics, settings: settings)
                 self.showsFiltered = true
                 self.isFiltering = false
                 self.task = nil

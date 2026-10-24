@@ -29,6 +29,8 @@ struct ContentView: View {
     @State private var syntheticSnapshot: LivePointCloudSnapshot?
     @State private var showsLiveSample = false
     @State private var resultStyle: MeshDisplayStyle = .points
+    @State private var filterSettings = ScanFilterSettings.load()
+    @State private var showsFilterSettings = false
 
     init() {
         let consent = PrivacyConsentStore()
@@ -39,6 +41,9 @@ struct ContentView: View {
     private var originalMesh: ScanMesh? { sampleMesh ?? scanner.result }
     private var mesh: ScanMesh? { originalMesh.map { scanFilter.displayedMesh(for: $0) } }
     private var filteredResult: ScanFilterResult? { originalMesh.flatMap { scanFilter.result(for: $0) } }
+    private var filterPresetLabel: String {
+        filterSettings == .gentle ? "轻度" : (filterSettings == .reference ? "参考参数" : "自定义")
+    }
     private var isScanning: Bool { scanner.phase == .scanning || scanner.phase == .processing }
     private var showsPoints: Bool { isScanning || mesh != nil || showsLiveSample }
     private var snapshot: LivePointCloudSnapshot? {
@@ -139,6 +144,7 @@ struct ContentView: View {
         }
         .onChange(of: scanFilter.showsFiltered) { _, _ in savedNotice = false }
         .onChange(of: scanFilter.result?.mesh.renderIdentity) { _, _ in savedNotice = false }
+        .onChange(of: filterSettings) { _, settings in settings.save() }
         .onOpenURL { url in openFile(url) }
         .fileImporter(isPresented: $choosingFile,
                       allowedContentTypes: [PLYFileType.type], allowsMultipleSelection: false) { result in
@@ -165,6 +171,12 @@ struct ContentView: View {
                     clearStagedExport()
                 }
                 .ignoresSafeArea()
+            }
+        }
+        .sheet(isPresented: $showsFilterSettings) {
+            ScanFilterSettingsView(settings: $filterSettings) {
+                showsFilterSettings = false
+                applyFilter()
             }
         }
         .task(id: showsLiveSample) {
@@ -313,6 +325,20 @@ struct ContentView: View {
                 .labelsHidden()
                 .accessibilityLabel("显示方式")
 
+                HStack {
+                    Button {
+                        showsFilterSettings = true
+                    } label: {
+                        Label("滤波参数", systemImage: "slider.horizontal.3")
+                    }
+                    .disabled(exporting || scanFilter.isFiltering)
+                    Spacer()
+                    Text(filterPresetLabel)
+                        .foregroundStyle(ScanTheme.secondary)
+                }
+                .font(.system(size: 13, weight: .medium))
+                .frame(minHeight: 28)
+
                 if let filteredResult {
                     Picker("结果对比", selection: $scanFilter.showsFiltered) {
                         Text("原始").tag(false)
@@ -325,6 +351,14 @@ struct ContentView: View {
                         .monospacedDigit()
                         .foregroundStyle(ScanTheme.secondary)
                         .accessibilityLabel("原始 \(filteredResult.statistics.inputCount) 点，滤波后 \(filteredResult.statistics.outputCount) 点，耗时 \(filteredResult.statistics.elapsedSeconds, specifier: "%.1f") 秒")
+                    Text("离群剔除 \(filteredResult.statistics.sorRejectedCount) · 位移剔除 \(filteredResult.statistics.modelRejectedCount)")
+                        .font(.system(size: 12))
+                        .foregroundStyle(ScanTheme.secondary)
+                    if filteredResult.settings != filterSettings {
+                        Text("参数已更改，重新滤波后生效")
+                            .font(.system(size: 12))
+                            .foregroundStyle(ScanTheme.tint)
+                    }
                 }
 
                 if scanFilter.isFiltering {
@@ -338,12 +372,9 @@ struct ContentView: View {
                 }
 
                 HStack(spacing: 12) {
-                    if filteredResult == nil {
-                        primaryButton("滤波", symbol: "camera.filters") {
-                            if let originalMesh { scanFilter.start(originalMesh) }
-                        }
+                    primaryButton(filteredResult == nil ? "滤波" : "重新滤波",
+                                  symbol: "camera.filters", action: applyFilter)
                         .disabled(exporting || scanFilter.isFiltering)
-                    }
                     primaryButton(exporting ? "正在导出…" : (mesh.isFiltered ? "导出滤波 PLY" : "导出 PLY"),
                                   symbol: "square.and.arrow.up") {
                         export(mesh)
@@ -402,6 +433,7 @@ struct ContentView: View {
 
     private func beginScan() {
         guard privacy.isAccepted else { showsPrivacy = true; return }
+        showsFilterSettings = false
         scanFilter.reset()
         resultStyle = .points
         hasEnteredCapture = true
@@ -417,6 +449,7 @@ struct ContentView: View {
     }
 
     private func restart() {
+        showsFilterSettings = false
         scanFilter.reset()
         resultStyle = .points
         hasEnteredCapture = true
@@ -430,6 +463,7 @@ struct ContentView: View {
     }
 
     private func revokeConsent() {
+        showsFilterSettings = false
         scanFilter.reset()
         resultStyle = .points
         privacy.revoke()
@@ -481,6 +515,13 @@ struct ContentView: View {
         }
     }
 
+    private func applyFilter() {
+        guard privacy.isAccepted, !exporting, !openingFile, importedDocument == nil,
+              let originalMesh else { return }
+        savedNotice = false
+        scanFilter.start(originalMesh, settings: filterSettings)
+    }
+
     private func clearStagedExport() {
         if let exportURL { try? FileManager.default.removeItem(at: exportURL) }
         exportURL = nil
@@ -495,6 +536,7 @@ struct ContentView: View {
     }
 
     private func openFile(_ url: URL) {
+        showsFilterSettings = false
         scanFilter.cancel()
         pickerGeneration = UUID()
         choosingFile = false

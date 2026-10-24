@@ -61,6 +61,26 @@ final class ScanExporterTests: XCTestCase {
                        mesh.vertexCount)
     }
 
+    func testFilteredExportRecordsAppliedSettingsAndColorBypass() throws {
+        var mesh = triangleFixture()
+        mesh.isFiltered = true
+        mesh.triangleIndices = []
+        var applied = ScanFilterSettings.gentle
+        applied.parameterGridSize = 0.001
+        applied.bilateralIterations = 0
+        mesh.filterSettings = applied
+        let url = try ScanExporter.export(mesh)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let text = try String(contentsOf: url, encoding: .utf8)
+        XCTAssertTrue(text.contains("geometry filtered, source RGB retained (8-bit)"))
+        XCTAssertFalse(text.contains("geometry and RGB filtered"))
+        XCTAssertTrue(text.contains("comment filter_parameters_units meters\n"))
+        let prefix = "comment filter_parameters_json "
+        let comment = try XCTUnwrap(text.split(separator: "\n").first { $0.hasPrefix(prefix) })
+        let parameters = Data(comment.dropFirst(prefix.count).utf8)
+        XCTAssertEqual(try JSONDecoder().decode(ScanFilterSettings.self, from: parameters), applied)
+    }
+
     func testEmptyMeshIsRejected() {
         let mesh = ScanMesh(vertices: [], triangleIndices: [], frameCount: 0, coveredAngles: [])
         XCTAssertThrowsError(try ScanExporter.export(mesh)) { error in

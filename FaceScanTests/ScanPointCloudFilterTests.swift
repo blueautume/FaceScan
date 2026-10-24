@@ -83,6 +83,37 @@ final class ScanPointCloudFilterTests: XCTestCase {
         XCTAssertEqual(actual.statistics.outputCount, expected.statistics.outputCount)
     }
 
+    func testCustomSettingsReachReferenceProcessorAndChangeTheOutput() async throws {
+        var source = fixture()
+        for index in source.vertices.indices {
+            source.vertices[index].color = SIMD3(Float(index % 13) / 12, Float(index % 7) / 6, 0.5)
+        }
+        var settings = ScanFilterSettings.gentle
+        settings.bilateralIterations = 0
+        settings.parameterGridSize = 0.0006
+        settings.maximumRadialDisplacement = 0.02
+        let input = source.vertices.map {
+            FaceCloudPoint(position: $0.position, color: SIMD3(byte($0.color.x), byte($0.color.y), byte($0.color.z)))
+        }
+        let expected = try FacePointCloudProcessor.process(input, configuration: settings.configuration)
+        let actual = try await ScanPointCloudFilter.processAsync(source, settings: settings)
+        let reference = try ScanPointCloudFilter.process(source)
+
+        XCTAssertEqual(actual.settings, settings)
+        XCTAssertEqual(actual.mesh.filterSettings, settings)
+        XCTAssertEqual(actual.mesh.vertices.map(\.position), expected.points.map(\.position))
+        XCTAssertEqual(actual.mesh.vertices.map(\.color), expected.points.map {
+            SIMD3(Float($0.color.x), Float($0.color.y), Float($0.color.z)) / 255
+        })
+        XCTAssertNotEqual(actual.mesh.vertices.map(\.position), reference.mesh.vertices.map(\.position),
+                          "Changing smoothing/grid parameters must change the processed geometry.")
+        for (vertex, sourceIndex) in zip(actual.mesh.vertices, expected.sourceIndices) {
+            let originalColor = input[sourceIndex].color
+            XCTAssertEqual(vertex.color, SIMD3(Float(originalColor.x), Float(originalColor.y), Float(originalColor.z)) / 255,
+                           "Disabling color filtering preserves each surviving point's input RGB.")
+        }
+    }
+
     func testCancellationDoesNotReturnAFilteredScan() async throws {
         let source = fixture()
         let task = Task.detached { try await ScanPointCloudFilter.processAsync(source) }

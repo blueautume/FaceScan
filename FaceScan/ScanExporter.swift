@@ -83,6 +83,18 @@ enum ScanExporter {
         let kind = mesh.isSample ? "sample" : "truedepth"
         let variant = mesh.isFiltered ? "-filtered" : ""
         let filename = "FaceScan-\(kind)\(variant)-\(UUID().uuidString.prefix(8)).ply"
+        var processing = "original"
+        var filterComments = ""
+        if mesh.isFiltered {
+            let settings = mesh.filterSettings ?? .reference
+            let preset = settings == .reference ? "reference" : "custom"
+            let colors = settings.filterColors ? "geometry and RGB filtered" : "geometry filtered, source RGB retained (8-bit)"
+            processing = "FacePointCloudProcessor \(preset) - \(colors), display only"
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = .sortedKeys
+            let parameters = String(decoding: try encoder.encode(settings), as: UTF8.self)
+            filterComments = "comment filter_parameters_units meters\ncomment filter_parameters_json \(parameters)\n"
+        }
         let directory = temporaryExportDirectory
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let url = directory.appendingPathComponent(filename)
@@ -90,8 +102,8 @@ enum ScanExporter {
         ply
         format ascii 1.0
         comment FaceScan \(mesh.isSample ? "synthetic sample - not a real scan" : (mesh.isFiltered ? "TrueDepth filtered point cloud - modified geometry" : "TrueDepth measured surface"))
-        comment processing \(mesh.isFiltered ? "FacePointCloudProcessor reference - geometry and RGB filtered, display only" : "original")
-        comment coordinate_units meters
+        comment processing \(processing)
+        \(filterComments)comment coordinate_units meters
         comment coordinate_frame ARFaceAnchor local, +Y up, +Z face forward
         comment accepted_depth_frames \(mesh.frameCount)
         comment captured_views \(ScanAngle.allCases.filter { mesh.coveredAngles.contains($0) }.map(\.rawValue).joined(separator: ","))

@@ -3,6 +3,13 @@ import Foundation
 struct ScanFilterResult: Sendable {
     let mesh: ScanMesh
     let statistics: FaceCloudStatistics
+    let settings: ScanFilterSettings
+
+    init(mesh: ScanMesh, statistics: FaceCloudStatistics, settings: ScanFilterSettings = .reference) {
+        self.mesh = mesh
+        self.statistics = statistics
+        self.settings = settings
+    }
 }
 
 /// Adapts completed, face-local meter-scale scans to the supplied reference pipeline.
@@ -22,7 +29,7 @@ enum ScanPointCloudFilter {
     }
 
     /// CPU work, including color conversion, runs on the caller's processing thread.
-    nonisolated static func process(_ mesh: ScanMesh) throws -> ScanFilterResult {
+    nonisolated static func process(_ mesh: ScanMesh, settings: ScanFilterSettings = .reference) throws -> ScanFilterResult {
         try Task.checkCancellation()
         guard !mesh.vertices.isEmpty else { throw FilterError.emptyMesh }
         var points: [FaceCloudPoint] = []
@@ -36,7 +43,8 @@ enum ScanPointCloudFilter {
             }
             points.append(FaceCloudPoint(position: p, color: SIMD3(byte(c.x), byte(c.y), byte(c.z))))
         }
-        let result = try FacePointCloudProcessor.process(points, isCancelled: { Task.isCancelled })
+        let result = try FacePointCloudProcessor.process(points, configuration: settings.configuration,
+                                                        isCancelled: { Task.isCancelled })
         try Task.checkCancellation()
         guard !result.points.isEmpty else { throw FilterError.emptyResult }
         var vertices: [ScanVertex] = []
@@ -51,13 +59,13 @@ enum ScanPointCloudFilter {
         // The reference deletes/reprojects vertices; the measured triangle topology is no longer valid.
         let filtered = ScanMesh(vertices: vertices, triangleIndices: [], frameCount: mesh.frameCount,
                                 coveredAngles: mesh.coveredAngles, isSample: mesh.isSample,
-                                isFiltered: true)
-        return ScanFilterResult(mesh: filtered, statistics: result.statistics)
+                                isFiltered: true, filterSettings: settings)
+        return ScanFilterResult(mesh: filtered, statistics: result.statistics, settings: settings)
     }
 
-    nonisolated static func processAsync(_ mesh: ScanMesh) async throws -> ScanFilterResult {
+    nonisolated static func processAsync(_ mesh: ScanMesh, settings: ScanFilterSettings = .reference) async throws -> ScanFilterResult {
         try Task.checkCancellation()
-        let worker = Task.detached(priority: .userInitiated) { try process(mesh) }
+        let worker = Task.detached(priority: .userInitiated) { try process(mesh, settings: settings) }
         return try await withTaskCancellationHandler {
             let result = try await worker.value
             try Task.checkCancellation()

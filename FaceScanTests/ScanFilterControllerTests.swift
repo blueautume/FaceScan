@@ -9,7 +9,7 @@ final class ScanFilterControllerTests: XCTestCase {
         let originalPositions = source.vertices.map(\.position)
         let output = filteredResult(from: source)
         let gate = FilterWorkerGate()
-        let controller = ScanFilterController { mesh in try await gate.process(mesh) }
+        let controller = ScanFilterController { mesh, settings in try await gate.process(mesh, settings: settings) }
 
         controller.start(source)
         XCTAssertTrue(controller.isFiltering)
@@ -40,7 +40,7 @@ final class ScanFilterControllerTests: XCTestCase {
     func testResultNeverAppliesToAnotherScanOrChangedGeometry() async throws {
         let source = sourceMesh()
         let output = filteredResult(from: source)
-        let controller = ScanFilterController { _ in output }
+        let controller = ScanFilterController { _, _ in output }
         controller.start(source)
         await controller.waitUntilFinished()
 
@@ -57,7 +57,7 @@ final class ScanFilterControllerTests: XCTestCase {
     func testResetDiscardsLateNonCooperativeWorkerAndAllowsNewScan() async throws {
         let source = sourceMesh()
         let gate = FilterWorkerGate()
-        let controller = ScanFilterController { mesh in try await gate.process(mesh) }
+        let controller = ScanFilterController { mesh, settings in try await gate.process(mesh, settings: settings) }
         controller.start(source)
         await gate.waitForRequest(source.renderIdentity)
         let oldCompletion = await completionOfCurrentWork(controller)
@@ -87,7 +87,7 @@ final class ScanFilterControllerTests: XCTestCase {
     func testCancelDiscardsLateOutputAndKeepsCompletedComparison() async throws {
         let source = sourceMesh()
         let gate = FilterWorkerGate()
-        let controller = ScanFilterController { mesh in try await gate.process(mesh) }
+        let controller = ScanFilterController { mesh, settings in try await gate.process(mesh, settings: settings) }
         controller.start(source)
         await gate.waitForRequest(source.renderIdentity)
         let completion = await completionOfCurrentWork(controller)
@@ -113,7 +113,7 @@ final class ScanFilterControllerTests: XCTestCase {
     func testFailurePreservesOriginalAndRetryCanSucceed() async throws {
         let source = sourceMesh()
         let gate = FilterWorkerGate()
-        let controller = ScanFilterController { mesh in try await gate.process(mesh) }
+        let controller = ScanFilterController { mesh, settings in try await gate.process(mesh, settings: settings) }
         controller.start(source)
         await gate.waitForRequest(source.renderIdentity)
         await gate.fail(source.renderIdentity)
@@ -132,6 +132,81 @@ final class ScanFilterControllerTests: XCTestCase {
         await controller.waitUntilFinished()
         XCTAssertEqual(controller.displayedMesh(for: source).renderIdentity, output.mesh.renderIdentity)
         XCTAssertNil(controller.errorMessage)
+    }
+
+    @MainActor
+    func testChangedSettingsReprocessOriginalAndUnchangedSettingsUseCache() async throws {
+        let source = sourceMesh()
+        let gate = FilterWorkerGate()
+        let controller = ScanFilterController { mesh, settings in try await gate.process(mesh, settings: settings) }
+        controller.start(source, settings: .reference)
+        await gate.waitForRequest(source.renderIdentity)
+        let firstOutput = filteredResult(from: source)
+        await gate.succeed(source.renderIdentity, with: firstOutput)
+        await controller.waitUntilFinished()
+
+        controller.showsFiltered = false
+        controller.start(source, settings: .gentle)
+        await gate.waitForRequest(source.renderIdentity)
+        XCTAssertFalse(controller.showsFiltered, "Changing parameters preserves the selected comparison during work.")
+        XCTAssertEqual(controller.result(for: source)?.settings, .reference)
+        let inputs = await gate.receivedMeshes
+        let configurations = await gate.receivedSettings
+        XCTAssertEqual(inputs.count, 2)
+        XCTAssertTrue(inputs.allSatisfy { !$0.isFiltered && $0.renderIdentity == source.renderIdentity })
+        XCTAssertEqual(inputs.last?.vertices.map(\.position), source.vertices.map(\.position),
+                       "Re-filtering must never compound deformation by using the prior filtered result.")
+        XCTAssertEqual(configurations, [.reference, .gentle])
+
+        let secondOutput = filteredResult(from: source)
+        await gate.succeed(source.renderIdentity, with: secondOutput)
+        await controller.waitUntilFinished()
+        XCTAssertTrue(controller.showsFiltered)
+        XCTAssertEqual(controller.result(for: source)?.settings, .gentle)
+        XCTAssertEqual(controller.result(for: source)?.mesh.renderIdentity, secondOutput.mesh.renderIdentity)
+        controller.start(source, settings: .gentle)
+        let count = await gate.requestCount
+        XCTAssertEqual(count, 2)
+    }
+
+    @MainActor
+    func testFailedOrCancelledParameterRerunKeepsLastSuccessfulResult() async throws {
+        let source = sourceMesh()
+        let gate = FilterWorkerGate()
+        let controller = ScanFilterController { mesh, settings in try await gate.process(mesh, settings: settings) }
+        controller.start(source)
+        await gate.waitForRequest(source.renderIdentity)
+        let previous = filteredResult(from: source)
+        await gate.succeed(source.renderIdentity, with: previous)
+        await controller.waitUntilFinished()
+
+        controller.start(source, settings: .gentle)
+        await gate.waitForRequest(source.renderIdentity)
+        XCTAssertEqual(controller.displayedMesh(for: source).renderIdentity, previous.mesh.renderIdentity)
+        await gate.fail(source.renderIdentity)
+        await controller.waitUntilFinished()
+        XCTAssertEqual(controller.result(for: source)?.settings, .reference)
+        XCTAssertEqual(controller.displayedMesh(for: source).renderIdentity, previous.mesh.renderIdentity)
+        XCTAssertNotNil(controller.errorMessage)
+
+        controller.start(source, settings: .gentle)
+        await gate.waitForRequest(source.renderIdentity)
+        let cancelledCompletion = await completionOfCurrentWork(controller)
+        controller.cancel()
+        await gate.succeed(source.renderIdentity, with: filteredResult(from: source))
+        await cancelledCompletion.value
+        XCTAssertFalse(controller.isFiltering)
+        XCTAssertNil(controller.errorMessage)
+        XCTAssertEqual(controller.result(for: source)?.settings, .reference)
+        XCTAssertEqual(controller.displayedMesh(for: source).renderIdentity, previous.mesh.renderIdentity)
+
+        controller.start(source, settings: .gentle)
+        await gate.waitForRequest(source.renderIdentity)
+        let replacement = filteredResult(from: source)
+        await gate.succeed(source.renderIdentity, with: replacement)
+        await controller.waitUntilFinished()
+        XCTAssertEqual(controller.result(for: source)?.settings, .gentle)
+        XCTAssertEqual(controller.displayedMesh(for: source).renderIdentity, replacement.mesh.renderIdentity)
     }
 
     @MainActor
@@ -175,10 +250,14 @@ private actor FilterWorkerGate {
     private var pending: [UUID: CheckedContinuation<ScanFilterResult, Error>] = [:]
     private var requestWaiters: [UUID: [CheckedContinuation<Void, Never>]] = [:]
     private(set) var requestCount = 0
+    private(set) var receivedMeshes: [ScanMesh] = []
+    private(set) var receivedSettings: [ScanFilterSettings] = []
 
-    func process(_ mesh: ScanMesh) async throws -> ScanFilterResult {
+    func process(_ mesh: ScanMesh, settings: ScanFilterSettings) async throws -> ScanFilterResult {
         try await withCheckedThrowingContinuation { continuation in
             requestCount += 1
+            receivedMeshes.append(mesh)
+            receivedSettings.append(settings)
             pending[mesh.renderIdentity] = continuation
             requestWaiters.removeValue(forKey: mesh.renderIdentity)?.forEach { $0.resume() }
         }
