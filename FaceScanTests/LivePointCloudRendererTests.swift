@@ -35,6 +35,7 @@ final class LivePointCloudRendererTests: XCTestCase {
         ]
         coordinator.update(snapshot: LivePointCloudSnapshot(revision: 1, vertices: vertices,
                                                             confirmedPointCount: vertices.count), in: view)
+        await coordinator.waitForPendingUpdates()
         host.view.layoutIfNeeded()
         await waitForRender(in: renderObserver, after: 0)
         XCTAssertGreaterThan(renderObserver.count, 0, "A paused viewer must draw its initial point cloud.")
@@ -132,13 +133,14 @@ final class LivePointCloudRendererTests: XCTestCase {
     }
 
     @MainActor
-    func testNewRevisionsPreserveCameraAndDuplicateRevisionReusesGeometry() throws {
+    func testNewRevisionsPreserveCameraAndDuplicateRevisionReusesGeometry() async throws {
         let view = LivePointCloudSceneView(frame: CGRect(x: 0, y: 0, width: 340, height: 500))
         let coordinator = LivePointCloudView.Coordinator()
         coordinator.install(in: view)
         let vertex = ScanVertex(position: .zero, color: SIMD3(0.4, 0.5, 0.6))
         coordinator.update(snapshot: LivePointCloudSnapshot(revision: 1, vertices: [vertex],
                                                             confirmedPointCount: 1), in: view)
+        await coordinator.waitForPendingUpdates()
         let node = try XCTUnwrap(view.scene?.rootNode.childNode(withName: "livePointCloud", recursively: false))
         let firstGeometry = try XCTUnwrap(node.geometry)
         let camera = try XCTUnwrap(view.pointOfView)
@@ -148,25 +150,29 @@ final class LivePointCloudRendererTests: XCTestCase {
 
         coordinator.update(snapshot: LivePointCloudSnapshot(revision: 1, vertices: [vertex, vertex],
                                                             confirmedPointCount: 2), in: view)
+        await coordinator.waitForPendingUpdates()
         XCTAssertTrue(node.geometry === firstGeometry, "UI-only updates must not reupload point buffers.")
         coordinator.update(snapshot: LivePointCloudSnapshot(revision: 2, vertices: [vertex, vertex],
                                                             confirmedPointCount: 2), in: view)
+        await coordinator.waitForPendingUpdates()
         XCTAssertFalse(node.geometry === firstGeometry)
         XCTAssertEqual(node.geometry?.elements.first?.primitiveCount, 2)
         XCTAssertEqual(camera.simdTransform, userCameraTransform, "New points must not override orbit or zoom.")
         XCTAssertTrue(view.accessibilityLabel?.contains("2 个点") == true)
 
         coordinator.update(snapshot: nil, in: view)
+        await coordinator.waitForPendingUpdates()
         XCTAssertNil(node.geometry)
         XCTAssertNotEqual(camera.simdTransform, userCameraTransform, "Starting a new scan resets the camera once.")
         coordinator.update(snapshot: LivePointCloudSnapshot(revision: 1, vertices: [vertex],
                                                             confirmedPointCount: 1), in: view)
+        await coordinator.waitForPendingUpdates()
         XCTAssertEqual(node.geometry?.elements.first?.primitiveCount, 1,
                        "Reusing a revision after clearing must still display the new scan.")
     }
 
     @MainActor
-    func testHeadPoseMovesExistingPointsAndFreezesWhenScanningStops() throws {
+    func testHeadPoseMovesExistingPointsAndFreezesWhenScanningStops() async throws {
         let view = LivePointCloudSceneView(frame: CGRect(x: 0, y: 0, width: 340, height: 500))
         let coordinator = LivePointCloudView.Coordinator()
         coordinator.install(in: view)
@@ -177,6 +183,7 @@ final class LivePointCloudRendererTests: XCTestCase {
         let vertex = ScanVertex(position: SIMD3(0.04, 0, 0), color: SIMD3(0.4, 0.5, 0.6))
         let snapshot = LivePointCloudSnapshot(revision: 1, vertices: [vertex], confirmedPointCount: 1)
         coordinator.update(snapshot: snapshot, poseStore: store, followsFacePose: true, in: view)
+        await coordinator.waitForPendingUpdates()
         let node = try XCTUnwrap(view.scene?.rootNode.childNode(withName: "livePointCloud", recursively: false))
         let geometry = try XCTUnwrap(node.geometry)
         let camera = try XCTUnwrap(view.pointOfView)
@@ -193,6 +200,7 @@ final class LivePointCloudRendererTests: XCTestCase {
         XCTAssertEqual(camera.simdTransform, cameraTransform)
 
         coordinator.update(snapshot: snapshot, poseStore: store, followsFacePose: false, in: view)
+        await coordinator.waitForPendingUpdates()
         XCTAssertTrue(view.allowsCameraControl)
         XCTAssertEqual(node.simdTransform, trackedTransform, "Stopping must keep the last displayed angle.")
         store.update(faceToCamera: matrix_identity_float4x4)
@@ -204,12 +212,13 @@ final class LivePointCloudRendererTests: XCTestCase {
         coordinator.update(snapshot: LivePointCloudSnapshot(revision: 2, vertices: [vertex, vertex],
                                                             confirmedPointCount: 2),
                            poseStore: store, followsFacePose: false, in: view)
+        await coordinator.waitForPendingUpdates()
         XCTAssertEqual(node.simdTransform, trackedTransform)
         XCTAssertEqual(camera.simdTransform, userCameraTransform)
     }
 
     @MainActor
-    func testInitialMagnifiedFramingIsIndependentOfFirstPoint() throws {
+    func testInitialMagnifiedFramingIsIndependentOfFirstPoint() async throws {
         let view = LivePointCloudSceneView(frame: CGRect(x: 0, y: 0, width: 340, height: 500))
         let coordinator = LivePointCloudView.Coordinator()
         coordinator.install(in: view)
@@ -218,6 +227,7 @@ final class LivePointCloudRendererTests: XCTestCase {
         let cheek = ScanVertex(position: SIMD3(0.08, 0, 0), color: SIMD3(repeating: 0.5))
         coordinator.update(snapshot: LivePointCloudSnapshot(revision: 1, vertices: [cheek],
                                                             confirmedPointCount: 0), in: view)
+        await coordinator.waitForPendingUpdates()
         XCTAssertEqual(camera.simdTransform, initialTransform)
         for point: SCNVector3 in [SCNVector3(0, 0.18, 0), SCNVector3(0, -0.14, 0),
                                  SCNVector3(-0.125, 0, -0.1), SCNVector3(0.125, 0, -0.1)] {
@@ -237,7 +247,7 @@ final class LivePointCloudRendererTests: XCTestCase {
     }
 
     @MainActor
-    func testCaptureProjectionMagnifiesBothAxesByOnePointSevenAtMultipleDepths() throws {
+    func testCaptureProjectionMagnifiesBothAxesByOnePointSevenAtMultipleDepths() async throws {
         for size in [CGSize(width: 340, height: 500), CGSize(width: 360, height: 620)] {
             let frame = CGRect(origin: .zero, size: size)
             let view = LivePointCloudSceneView(frame: frame)

@@ -74,6 +74,7 @@ struct PLYViewerView: UIViewRepresentable {
             if let preview = view as? PLYPointCloudSceneView {
                 preview.fitCameraNode = cameraNode
                 preview.cloudRadius = cloud?.radius ?? 1
+                preview.cloudHalfExtents = cloud?.halfExtents ?? SIMD3(repeating: 1)
                 preview.needsInitialFit = true
                 preview.fitCameraIfNeeded()
             }
@@ -86,6 +87,7 @@ struct PLYPointCloudGeometry {
     let geometry: SCNGeometry
     let pointCount: Int
     let radius: Float
+    let halfExtents: SIMD3<Float>
 }
 
 enum PLYPointGeometryBuilder {
@@ -141,7 +143,8 @@ enum PLYPointGeometryBuilder {
         material.isDoubleSided = true
         geometry.materials = [material]
         return PLYPointCloudGeometry(geometry: geometry, pointCount: count,
-                                     radius: max(Float(sqrt(radiusSquared)), 0.05))
+                                     radius: max(Float(sqrt(radiusSquared)), 0.05),
+                                     halfExtents: SIMD3<Float>(extent * (scale * 0.5)))
     }
 
     private static func isRenderable(_ vertex: ScanVertex) -> Bool {
@@ -153,11 +156,12 @@ enum PLYPointGeometryBuilder {
     }
 }
 
-/// A sphere fit includes the entire imported object even after it is orbited.
-/// The deferred initial fit runs once layout gives us the actual aspect ratio.
+/// Match the scan's initial display size, with a fit guard for unusually shaped
+/// files. Deferred framing runs once; later layout updates preserve orbit/zoom.
 final class PLYPointCloudSceneView: SCNView {
     weak var fitCameraNode: SCNNode?
     var cloudRadius: Float = 1
+    var cloudHalfExtents = SIMD3<Float>(repeating: 1)
     var needsInitialFit = false
 
     override func layoutSubviews() {
@@ -169,10 +173,19 @@ final class PLYPointCloudSceneView: SCNView {
         guard needsInitialFit, bounds.width > 0, bounds.height > 0,
               let cameraNode = fitCameraNode, let camera = cameraNode.camera else { return }
         let aspect = Float(bounds.width / bounds.height)
-        let verticalHalfAngle = Float(camera.fieldOfView) * .pi / 360
-        let horizontalHalfAngle = atan(tan(verticalHalfAngle) * aspect)
-        let limitingHalfAngle = min(verticalHalfAngle, horizontalHalfAngle)
-        let distance = cloudRadius / sin(limitingHalfAngle) * 1.12
+        let horizontalHalfAngle = ScanDisplayFraming.horizontalHalfAngle(aspect: aspect)
+        let horizontalTangent = tan(horizontalHalfAngle)
+        let verticalTangent = horizontalTangent / aspect
+        // Imported units are arbitrary. Its normalized two-unit span represents
+        // a typical facial span while the camera uses the live scan's lens.
+        let scanDistance = ScanDisplayFraming.cameraDistance(aspect: aspect)
+            * 2 / ScanDisplayFraming.nominalFaceSpan
+        let fitDistance = cloudHalfExtents.z
+            + max(cloudHalfExtents.x / horizontalTangent,
+                  cloudHalfExtents.y / verticalTangent) / 0.95
+        let distance = max(scanDistance, fitDistance)
+        camera.projectionDirection = .horizontal
+        camera.fieldOfView = CGFloat(2 * horizontalHalfAngle * 180 / .pi)
         camera.zFar = Double(max(distance + cloudRadius * 4, 100))
         cameraNode.simdPosition = SIMD3(0, 0, distance)
         cameraNode.look(at: SCNVector3Zero)

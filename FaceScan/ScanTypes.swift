@@ -9,11 +9,26 @@ struct ScanVertex: Sendable {
 }
 
 struct ScanMesh: Sendable {
-    var vertices: [ScanVertex]
-    var triangleIndices: [UInt32]
+    private(set) var renderIdentity: UUID
+    var vertices: [ScanVertex] {
+        didSet { renderIdentity = UUID() }
+    }
+    var triangleIndices: [UInt32] {
+        didSet { renderIdentity = UUID() }
+    }
     var frameCount: Int
     var coveredAngles: Set<ScanAngle>
     var isSample: Bool = false
+
+    init(vertices: [ScanVertex], triangleIndices: [UInt32], frameCount: Int,
+         coveredAngles: Set<ScanAngle>, isSample: Bool = false) {
+        renderIdentity = UUID()
+        self.vertices = vertices
+        self.triangleIndices = triangleIndices
+        self.frameCount = frameCount
+        self.coveredAngles = coveredAngles
+        self.isSample = isSample
+    }
 
     var vertexCount: Int { vertices.count }
 }

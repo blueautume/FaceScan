@@ -1,8 +1,18 @@
 import SceneKit
 import UIKit
-import simd
 
-/// A bounded display-only animation. Captured positions and exported meshes remain untouched.
+/// Shader attributes use Float32, so keep their clock near zero even after a
+/// device has been running for days. Scheduling deadlines remain Double values.
+enum PointCloudAnimationTime {
+    static let origin = CACurrentMediaTime()
+
+    static func shaderTime(at absoluteTime: TimeInterval) -> Float {
+        Float(absoluteTime - origin)
+    }
+}
+
+/// Updates one prepared GPU animation. Point packing and birth matching belong
+/// to the background render-data builder; this object only updates uniforms.
 @MainActor
 final class PointCloudFlight {
     static let duration: TimeInterval = 0.8
@@ -10,105 +20,60 @@ final class PointCloudFlight {
 
     private weak var view: SCNView?
     private weak var material: SCNMaterial?
-    private let epoch = CACurrentMediaTime()
-    private var births: [Cell: Birth] = [:]
     private var endTime: TimeInterval = 0
-    private var displayLink: CADisplayLink?
     private var completionTask: Task<Void, Never>?
-    private lazy var target = FlightDisplayTarget(flight: self)
+    private(set) var isActive = false
 
-    private struct Cell: Hashable {
-        let x: Int
-        let y: Int
-        let z: Int
-        init(_ point: SIMD3<Float>) {
-            x = Int((point.x / 0.004).rounded())
-            y = Int((point.y / 0.004).rounded())
-            z = Int((point.z / 0.004).rounded())
-        }
-        init(x: Int, y: Int, z: Int) { self.x = x; self.y = y; self.z = z }
-    }
-    private struct Birth {
-        let position: SIMD3<Float>
-        let time: Float
+    init(view: SCNView) {
+        self.view = view
+        (view as? LivePointCloudSceneView)?.setFlightAnimation(self)
     }
 
-    init(view: SCNView) { self.view = view }
-
-    func makeGeometry(vertices: [ScanVertex]) -> SCNGeometry? {
-        let vertices = vertices.filter(LivePointGeometryBuilder.isRenderable)
-        guard let points = LivePointGeometryBuilder.makeGeometry(vertices: vertices) else {
-            reset()
-            return nil
+    func activate(geometry: SCNGeometry?, endTime: TimeInterval?) {
+        let nextMaterial = geometry?.firstMaterial
+        if material !== nextMaterial {
+            material?.setValue(Float(0), forKey: "pointFlightEnabled")
         }
-        let time = now
-        var attributes: [Float] = []
-        attributes.reserveCapacity(vertices.count * 2)
-        // The facial volume normally occupies only a few thousand cells. Keep a hard
-        // history bound in case a malformed input moves points throughout the volume.
-        if births.count > 100_000 { births.removeAll(keepingCapacity: true) }
-        for vertex in vertices {
-            let key = Cell(vertex.position)
-            var birth = births[key]?.time
-            if birth == nil {
-                nearby: for z in -1...1 {
-                    for y in -1...1 {
-                        for x in -1...1 {
-                            let neighbor = Cell(x: key.x + x, y: key.y + y, z: key.z + z)
-                            if let previous = births[neighbor],
-                               simd_distance_squared(previous.position, vertex.position) <= 0.000016 {
-                                birth = previous.time
-                                break nearby
-                            }
-                        }
-                    }
-                }
-            }
-            let start = birth ?? Float(time)
-            births[key] = Birth(position: vertex.position, time: start)
-            endTime = max(endTime, Double(start) + Self.duration)
-            attributes.append(contentsOf: [start, 0])
+        material = nextMaterial
+        let now = CACurrentMediaTime()
+        guard let endTime, endTime.isFinite, endTime > now,
+              material != nil, geometry?.sources(for: .texcoord).isEmpty == false else {
+            finish()
+            return
         }
-        let data = attributes.withUnsafeBytes { Data($0) }
-        let times = SCNGeometrySource(data: data, semantic: .texcoord,
-            vectorCount: vertices.count, usesFloatComponents: true,
-            componentsPerVector: 2, bytesPerComponent: MemoryLayout<Float>.size,
-            dataOffset: 0, dataStride: MemoryLayout<Float>.size * 2)
-        let geometry = SCNGeometry(sources: points.sources + [times], elements: points.elements)
-        geometry.materials = points.materials
-        material = geometry.firstMaterial
-        material?.shaderModifiers = [.geometry: Self.shader]
+        self.endTime = endTime
+        isActive = true
+        view?.rendersContinuously = true
+        view?.isPlaying = true
+        tick(at: now)
         scheduleCompletion()
-        tick()
-        return geometry
+        (view as? LivePointCloudSceneView)?.updateRenderClock()
     }
 
     func finish() {
         completionTask?.cancel()
         completionTask = nil
-        displayLink?.invalidate()
-        displayLink = nil
+        isActive = false
         endTime = 0
         material?.setValue(Float(0), forKey: "pointFlightEnabled")
         view?.rendersContinuously = false
         view?.isPlaying = false
         view?.setNeedsDisplay()
+        // Pose tracking can still need the shared clock after particles settle.
+        (view as? LivePointCloudSceneView)?.updateRenderClock()
     }
 
     func reset() {
         finish()
-        births.removeAll(keepingCapacity: true)
         material = nil
     }
-
-    private var now: TimeInterval { CACurrentMediaTime() - epoch }
 
     private func scheduleCompletion() {
         completionTask?.cancel()
         let deadline = endTime
-        let delay = max(0, deadline - now)
-        // Display links may pause for offscreen views. Independently end the
-        // effect so a hidden renderer cannot retain a continuous render loop.
+        let delay = max(0, deadline - CACurrentMediaTime())
+        // Display links stop offscreen. The independent deadline still releases
+        // continuous rendering without retaining either the flight or the view.
         completionTask = Task { @MainActor [weak self] in
             do {
                 try await Task.sleep(for: .seconds(delay))
@@ -118,22 +83,15 @@ final class PointCloudFlight {
         }
     }
 
-    fileprivate func tick() {
-        let time = now
-        let active = material != nil && time < endTime
-        material?.setValue(Float(time), forKey: "pointFlightTime")
-        material?.setValue(Float(active ? 1 : 0), forKey: "pointFlightEnabled")
-        view?.rendersContinuously = active
-        view?.isPlaying = active
-        view?.setNeedsDisplay()
-        if active && displayLink == nil {
-            let link = CADisplayLink(target: target, selector: #selector(FlightDisplayTarget.tick))
-            link.preferredFramesPerSecond = 30
-            link.add(to: .main, forMode: .common)
-            displayLink = link
-        } else if !active {
+    func tick(at time: TimeInterval) {
+        guard isActive else { return }
+        guard material != nil, time < endTime else {
             finish()
+            return
         }
+        material?.setValue(PointCloudAnimationTime.shaderTime(at: time), forKey: "pointFlightTime")
+        material?.setValue(Float(1), forKey: "pointFlightEnabled")
+        view?.setNeedsDisplay()
     }
 
     // Birth time is a vertex attribute. Each frame updates only two uniforms;
@@ -147,11 +105,4 @@ final class PointCloudFlight {
     float remaining = 1.0 - t;
     _geometry.position.z += 0.14 * remaining * remaining * pointFlightEnabled;
     """
-}
-
-@MainActor
-private final class FlightDisplayTarget: NSObject {
-    weak var flight: PointCloudFlight?
-    init(flight: PointCloudFlight) { self.flight = flight }
-    @objc func tick() { flight?.tick() }
 }

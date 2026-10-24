@@ -60,7 +60,7 @@ private struct CameraPreview: UIViewRepresentable {
         view.scene = SCNScene()
         view.backgroundColor = ScanTheme.canvasUIColor
         view.automaticallyUpdatesLighting = false
-        view.preferredFramesPerSecond = 30
+        view.preferredFramesPerSecond = 60
         return view
     }
 

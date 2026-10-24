@@ -111,6 +111,116 @@ final class PLYViewerTests: XCTestCase {
         }
     }
 
+    @MainActor
+    func testImportedFaceDefaultSizeIsCloseToCompletedScan() async throws {
+        let mesh = SampleFaceMesh.make()
+        for size in [CGSize(width: 340, height: 500), CGSize(width: 700, height: 300)] {
+            let frame = CGRect(origin: .zero, size: size)
+            let scanView = LivePointCloudSceneView(frame: frame)
+            let scanCoordinator = LivePointCloudView.Coordinator()
+            scanCoordinator.install(in: scanView)
+            defer { scanCoordinator.stopAnimations() }
+            let snapshot = LivePointCloudSnapshot(revision: 1, vertices: mesh.vertices,
+                                                  confirmedPointCount: mesh.vertexCount, isSample: true)
+            scanCoordinator.update(snapshot: snapshot, surfaceMesh: mesh, in: scanView)
+            await scanCoordinator.waitForPendingUpdates()
+            let scanNode = try XCTUnwrap(scanView.poseNode)
+            _ = scanView.snapshot()
+            let scanSize = try projectedSize(of: scanNode, in: scanView)
+
+            let importedView = PLYPointCloudSceneView(frame: frame)
+            let importedCoordinator = PLYViewerView.Coordinator()
+            importedCoordinator.install(in: importedView)
+            importedCoordinator.update(id: UUID(), mesh: mesh, in: importedView)
+            let importedNode = try XCTUnwrap(importedView.scene?.rootNode.childNode(
+                withName: "importedPLYPointCloud", recursively: false))
+            _ = importedView.snapshot()
+            let importedSize = try projectedSize(of: importedNode, in: importedView)
+            XCTAssertEqual(importedSize.x / scanSize.x, 1, accuracy: 0.08,
+                           "Opening the same face should retain approximately the scanning display width.")
+            XCTAssertEqual(importedSize.y / scanSize.y, 1, accuracy: 0.08,
+                           "Opening the same face should retain approximately the scanning display height.")
+        }
+    }
+
+    @MainActor
+    func testImportedDefaultFramingIsIndependentOfUnitsAndTranslation() throws {
+        let mesh = SampleFaceMesh.make()
+        var expectedSize: SIMD2<Float>?
+        var expectedCamera: simd_float4x4?
+        for (scale, translation): (Float, SIMD3<Float>) in [
+            (1, .zero), (1_000, SIMD3(1200, -800, 3000))
+        ] {
+            let transformed = ScanMesh(vertices: mesh.vertices.map {
+                ScanVertex(position: $0.position * scale + translation, color: $0.color)
+            }, triangleIndices: mesh.triangleIndices, frameCount: mesh.frameCount, coveredAngles: [])
+            let originalFirst = transformed.vertices[0]
+            let view = PLYPointCloudSceneView(frame: CGRect(x: 0, y: 0, width: 340, height: 500))
+            let coordinator = PLYViewerView.Coordinator()
+            coordinator.install(in: view)
+            coordinator.update(id: UUID(), mesh: transformed, in: view)
+            let node = try XCTUnwrap(view.scene?.rootNode.childNode(
+                withName: "importedPLYPointCloud", recursively: false))
+            _ = view.snapshot()
+            let size = try projectedSize(of: node, in: view)
+            let camera = try XCTUnwrap(view.pointOfView)
+            if let expectedSize, let expectedCamera {
+                XCTAssertEqual(size.x, expectedSize.x, accuracy: 0.005)
+                XCTAssertEqual(size.y, expectedSize.y, accuracy: 0.005)
+                XCTAssertEqual(camera.simdTransform, expectedCamera)
+            } else {
+                expectedSize = size
+                expectedCamera = camera.simdTransform
+            }
+            XCTAssertEqual(transformed.vertices[0].position, originalFirst.position,
+                           "The larger presentation must not rewrite the source file's coordinates.")
+            XCTAssertEqual(transformed.vertices[0].color, originalFirst.color)
+        }
+    }
+
+    @MainActor
+    func testImportedDefaultFramingWaitsForFirstLayoutAndThenPreservesUserView() throws {
+        let mesh = testMesh()
+        let id = UUID()
+        let view = PLYPointCloudSceneView(frame: .zero)
+        let coordinator = PLYViewerView.Coordinator()
+        coordinator.install(in: view)
+        coordinator.update(id: id, mesh: mesh, in: view)
+        XCTAssertTrue(view.needsInitialFit)
+        view.frame = CGRect(x: 0, y: 0, width: 340, height: 500)
+        view.setNeedsLayout()
+        view.layoutIfNeeded()
+        _ = view.snapshot()
+        XCTAssertFalse(view.needsInitialFit)
+        let camera = try XCTUnwrap(view.pointOfView)
+        XCTAssertGreaterThan(camera.position.z, 0)
+        let center = view.projectPoint(SCNVector3Zero)
+        XCTAssertEqual(center.x, Float(view.bounds.midX), accuracy: 0.001)
+        XCTAssertEqual(center.y, Float(view.bounds.midY), accuracy: 0.001)
+        camera.position = SCNVector3(1.2, 0.5, 3)
+        camera.eulerAngles = SCNVector3(0.1, 0.4, 0)
+        let userView = camera.simdTransform
+        view.frame.size.height = 410
+        view.setNeedsLayout()
+        view.layoutIfNeeded()
+        coordinator.update(id: id, mesh: mesh, in: view)
+        XCTAssertEqual(camera.simdTransform, userView)
+    }
+
+    @MainActor
+    private func projectedSize(of node: SCNNode, in view: SCNView) throws -> SIMD2<Float> {
+        let positions = try XCTUnwrap(node.geometry?.sources(for: .vertex).first)
+        var low = SIMD2<Float>(repeating: .infinity)
+        var high = SIMD2<Float>(repeating: -.infinity)
+        for index in 0..<positions.vectorCount {
+            let p = vector(in: positions, at: index)
+            let screen = view.projectPoint(node.convertPosition(SCNVector3(p), to: nil))
+            low = simd_min(low, SIMD2(screen.x, screen.y))
+            high = simd_max(high, SIMD2(screen.x, screen.y))
+        }
+        return high - low
+    }
+
     private func testMesh() -> ScanMesh {
         ScanMesh(vertices: [
             ScanVertex(position: SIMD3(1000, -500, 3000), color: SIMD3(0.3, 0.6, 0.9)),

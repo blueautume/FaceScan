@@ -37,14 +37,18 @@ final class ScanPresentationTests: XCTestCase {
     }
 
     @MainActor
-    func testSwitchingResultModeKeepsCameraAndFrozenHeadPose() throws {
+    func testSwitchingResultModeKeepsCameraAndFrozenHeadPose() async throws {
         let (view, coordinator) = renderer()
         defer { coordinator.stopAnimations() }
         let mesh = ScanMesh(vertices: fixture(), triangleIndices: [0, 1, 2],
                             frameCount: 5, coveredAngles: [])
         let snapshot = LivePointCloudSnapshot(revision: 6, vertices: mesh.vertices, confirmedPointCount: 3)
         coordinator.update(snapshot: snapshot, surfaceMesh: mesh, in: view)
+        await coordinator.waitForPendingUpdates()
         let node = try XCTUnwrap(view.scene?.rootNode.childNode(withName: "livePointCloud", recursively: false))
+        let pointGeometry = try XCTUnwrap(node.geometry)
+        let pointPositions = try XCTUnwrap(pointGeometry.sources(for: .vertex).first)
+        let pointColors = try XCTUnwrap(pointGeometry.sources(for: .color).first)
         let camera = try XCTUnwrap(view.pointOfView)
         camera.position = SCNVector3(0.12, 0.08, 0.51)
         camera.eulerAngles = SCNVector3(0.1, -0.2, 0.05)
@@ -52,18 +56,199 @@ final class ScanPresentationTests: XCTestCase {
         let cameraTransform = camera.simdTransform
         let headTransform = node.simdTransform
         coordinator.update(snapshot: snapshot, surfaceMesh: mesh, displayStyle: .color, in: view)
+        await coordinator.waitForPendingUpdates()
         XCTAssertEqual(node.geometry?.elements.first?.primitiveType, .triangles)
+        XCTAssertTrue(node.geometry?.sources(for: .vertex).first === pointPositions)
+        XCTAssertTrue(node.geometry?.sources(for: .color).first === pointColors)
+        XCTAssertTrue(node.geometry?.firstMaterial === pointGeometry.firstMaterial)
         let geometry = node.geometry
         coordinator.update(snapshot: snapshot, surfaceMesh: mesh, displayStyle: .color, in: view)
+        await coordinator.waitForPendingUpdates()
         XCTAssertTrue(node.geometry === geometry)
         coordinator.update(snapshot: snapshot, surfaceMesh: mesh, displayStyle: .points, in: view)
+        await coordinator.waitForPendingUpdates()
         XCTAssertEqual(node.geometry?.elements.first?.primitiveType, .point)
+        XCTAssertTrue(node.geometry === pointGeometry, "Returning to point mode must reuse the prepared result.")
         XCTAssertEqual(camera.simdTransform, cameraTransform)
         XCTAssertEqual(node.simdTransform, headTransform)
     }
 
     @MainActor
-    func testCompletedResultsCenterIndependentlyOfCapturePositionAndAngle() throws {
+    func testEqualSizedReplacementResultInvalidatesCachedGeometry() async throws {
+        let (view, coordinator) = renderer()
+        defer { coordinator.stopAnimations() }
+        let first = ScanMesh(vertices: fixture(), triangleIndices: [0, 1, 2],
+                             frameCount: 5, coveredAngles: [])
+        let snapshot = LivePointCloudSnapshot(revision: 6, vertices: first.vertices, confirmedPointCount: 3)
+        coordinator.update(snapshot: snapshot, surfaceMesh: first, displayStyle: .color, in: view)
+        await coordinator.waitForPendingUpdates()
+        let node = try XCTUnwrap(view.poseNode)
+        let firstGeometry = try XCTUnwrap(node.geometry)
+
+        let replacement = ScanMesh(vertices: fixture().map {
+            ScanVertex(position: $0.position + SIMD3(0.02, -0.01, 0.03), color: SIMD3(0.3, 0.4, 0.5))
+        }, triangleIndices: [0, 1, 2], frameCount: 5, coveredAngles: [])
+        coordinator.update(snapshot: snapshot, surfaceMesh: replacement, displayStyle: .color, in: view)
+        await coordinator.waitForPendingUpdates()
+        let replacementGeometry = try XCTUnwrap(node.geometry)
+        XCTAssertFalse(replacementGeometry === firstGeometry,
+                       "Two scans with equal revision and counts must not share stale cached geometry.")
+        let positions = try XCTUnwrap(replacementGeometry.sources(for: .vertex).first)
+        let colors = try XCTUnwrap(replacementGeometry.sources(for: .color).first)
+        for index in replacement.vertices.indices {
+            XCTAssertEqual(vector(in: positions, index: index), replacement.vertices[index].position)
+            XCTAssertEqual(vector(in: colors, index: index), replacement.vertices[index].color)
+        }
+        coordinator.update(snapshot: snapshot, surfaceMesh: replacement, displayStyle: .points, in: view)
+        await coordinator.waitForPendingUpdates()
+        XCTAssertTrue(node.geometry?.sources(for: .vertex).first === positions)
+    }
+
+    @MainActor
+    func testMutatingCopiedMeshInvalidatesCacheWithoutChangingRawCoordinates() async throws {
+        let (view, coordinator) = renderer()
+        defer { coordinator.stopAnimations() }
+        let original = ScanMesh(vertices: fixture(), triangleIndices: [0, 1, 2],
+                                frameCount: 5, coveredAngles: [])
+        let snapshot = LivePointCloudSnapshot(revision: 6, vertices: original.vertices, confirmedPointCount: 3)
+        coordinator.update(snapshot: snapshot, surfaceMesh: original, displayStyle: .color, in: view)
+        await coordinator.waitForPendingUpdates()
+        let node = try XCTUnwrap(view.poseNode)
+        let originalGeometry = try XCTUnwrap(node.geometry)
+        var copy = original
+        XCTAssertEqual(copy.renderIdentity, original.renderIdentity)
+        copy.vertices[0].position += SIMD3(0.015, -0.01, 0.02)
+        copy.vertices[0].color = SIMD3(0.25, 0.5, 0.75)
+        XCTAssertNotEqual(copy.renderIdentity, original.renderIdentity)
+        coordinator.update(snapshot: snapshot, surfaceMesh: copy, displayStyle: .color, in: view)
+        await coordinator.waitForPendingUpdates()
+        let copiedGeometry = try XCTUnwrap(node.geometry)
+        XCTAssertFalse(copiedGeometry === originalGeometry)
+        let copiedPositions = try XCTUnwrap(copiedGeometry.sources(for: .vertex).first)
+        let copiedColors = try XCTUnwrap(copiedGeometry.sources(for: .color).first)
+        XCTAssertEqual(vector(in: copiedPositions, index: 0), copy.vertices[0].position)
+        XCTAssertEqual(vector(in: copiedColors, index: 0), copy.vertices[0].color)
+        XCTAssertEqual(original.vertices[0].position, fixture()[0].position)
+        XCTAssertEqual(original.vertices[0].color, fixture()[0].color)
+
+        let vertexIdentity = copy.renderIdentity
+        copy.triangleIndices = [0, 2, 1]
+        XCTAssertNotEqual(copy.renderIdentity, vertexIdentity)
+        coordinator.update(snapshot: snapshot, surfaceMesh: copy, displayStyle: .color, in: view)
+        await coordinator.waitForPendingUpdates()
+        let changedFaces = try XCTUnwrap(node.geometry?.elements.first)
+        XCTAssertFalse(node.geometry === copiedGeometry)
+        XCTAssertEqual(changedFaces.data.withUnsafeBytes { bytes in
+            (0..<3).map { bytes.loadUnaligned(fromByteOffset: $0 * 4, as: UInt32.self) }
+        }, [0, 2, 1])
+        XCTAssertEqual(original.triangleIndices, [0, 1, 2])
+
+        let exportedMesh = copy
+        let url = try await Task.detached { try ScanExporter.export(exportedMesh) }.value
+        defer { try? FileManager.default.removeItem(at: url) }
+        let text = try String(contentsOf: url, encoding: .utf8)
+        let body = try XCTUnwrap(text.components(separatedBy: "end_header\n").last)
+        let lines = body.split(separator: "\n")
+        for index in copy.vertices.indices {
+            let fields = lines[index].split(separator: " ")
+            let expected = copy.vertices[index].position
+            XCTAssertEqual(try XCTUnwrap(Float(fields[0])), expected.x)
+            XCTAssertEqual(try XCTUnwrap(Float(fields[1])), expected.y)
+            XCTAssertEqual(try XCTUnwrap(Float(fields[2])), expected.z,
+                           "The 1.7× display magnification must not enter exported meter coordinates.")
+        }
+    }
+
+    @MainActor
+    func testPendingAcquisitionCannotReappearAfterClearOrTeardown() async throws {
+        let vertices = largeFixture()
+        for teardown in [false, true] {
+            let (view, coordinator) = renderer()
+            defer { coordinator.stopAnimations() }
+            coordinator.update(snapshot: LivePointCloudSnapshot(revision: 20, vertices: vertices,
+                                                                confirmedPointCount: vertices.count),
+                               animatesAcquisition: true, in: view)
+            // Both invalidations happen before the main actor can install any prepared result.
+            if teardown {
+                coordinator.stopAnimations()
+            } else {
+                coordinator.update(snapshot: nil, animatesAcquisition: true, in: view)
+            }
+            await coordinator.waitForPendingUpdates()
+            XCTAssertNil(view.poseNode?.geometry)
+            XCTAssertFalse(view.rendersContinuously)
+            XCTAssertFalse(view.isPlaying)
+        }
+    }
+
+    @MainActor
+    func testStoppingWhilePreparationIsPendingCannotRestartFlight() async throws {
+        let (view, coordinator) = renderer()
+        defer { coordinator.stopAnimations() }
+        let vertices = largeFixture()
+        let snapshot = LivePointCloudSnapshot(revision: 20, vertices: vertices,
+                                             confirmedPointCount: vertices.count)
+        coordinator.update(snapshot: snapshot, animatesAcquisition: true, in: view)
+        coordinator.update(snapshot: snapshot, animatesAcquisition: false, in: view)
+        await coordinator.waitForPendingUpdates()
+        XCTAssertEqual(view.poseNode?.geometry?.sources(for: .vertex).first?.vectorCount, vertices.count)
+        XCTAssertFalse(view.rendersContinuously)
+        XCTAssertFalse(view.isPlaying)
+    }
+
+    @MainActor
+    func testLatestSnapshotReplacesPendingAcquisition() async throws {
+        let (view, coordinator) = renderer()
+        defer { coordinator.stopAnimations() }
+        let large = largeFixture()
+        coordinator.update(snapshot: LivePointCloudSnapshot(revision: 20, vertices: large,
+                                                            confirmedPointCount: large.count),
+                           animatesAcquisition: true, in: view)
+        let latest = fixture()
+        coordinator.update(snapshot: LivePointCloudSnapshot(revision: 21, vertices: latest,
+                                                            confirmedPointCount: latest.count),
+                           animatesAcquisition: true, in: view)
+        await coordinator.waitForPendingUpdates()
+        let geometry = try XCTUnwrap(view.poseNode?.geometry)
+        let positions = try XCTUnwrap(geometry.sources(for: .vertex).first)
+        XCTAssertEqual(positions.vectorCount, latest.count)
+        for index in latest.indices {
+            XCTAssertEqual(vector(in: positions, index: index), latest[index].position)
+        }
+    }
+
+    @MainActor
+    func testModeChangesDuringFinalPreparationUseLatestSelection() async throws {
+        let (view, coordinator) = renderer()
+        defer { coordinator.stopAnimations() }
+        let vertices = fixture() + largeFixture()
+        let mesh = ScanMesh(vertices: vertices, triangleIndices: [0, 1, 2],
+                            frameCount: 20, coveredAngles: [])
+        let snapshot = LivePointCloudSnapshot(revision: 21, vertices: vertices,
+                                             confirmedPointCount: vertices.count)
+        let camera = try XCTUnwrap(view.pointOfView)
+        coordinator.update(snapshot: snapshot, surfaceMesh: mesh, displayStyle: .points, in: view)
+        coordinator.update(snapshot: snapshot, surfaceMesh: mesh, displayStyle: .color, in: view)
+        coordinator.update(snapshot: snapshot, surfaceMesh: mesh, displayStyle: .points, in: view)
+        coordinator.update(snapshot: snapshot, surfaceMesh: mesh, displayStyle: .color, in: view)
+        await coordinator.waitForPendingUpdates()
+        let node = try XCTUnwrap(view.poseNode)
+        let colorGeometry = try XCTUnwrap(node.geometry)
+        XCTAssertEqual(colorGeometry.elements.first?.primitiveType, .triangles)
+        XCTAssertTrue(view.pointOfView === camera)
+        camera.position = SCNVector3(0.08, 0.03, 0.51)
+        camera.eulerAngles = SCNVector3(0.1, 0.2, 0)
+        let userCamera = camera.simdTransform
+        coordinator.update(snapshot: snapshot, surfaceMesh: mesh, displayStyle: .points, in: view)
+        await coordinator.waitForPendingUpdates()
+        coordinator.update(snapshot: snapshot, surfaceMesh: mesh, displayStyle: .color, in: view)
+        await coordinator.waitForPendingUpdates()
+        XCTAssertTrue(node.geometry === colorGeometry)
+        XCTAssertEqual(camera.simdTransform, userCamera)
+    }
+
+    @MainActor
+    func testCompletedResultsCenterIndependentlyOfCapturePositionAndAngle() async throws {
         let vertices = fixture().map {
             ScanVertex(position: $0.position + SIMD3(0.027, -0.019, 0.013), color: $0.color)
         }
@@ -81,6 +266,7 @@ final class ScanPresentationTests: XCTestCase {
             let scan = LivePointCloudSnapshot(revision: 7, vertices: vertices, confirmedPointCount: 3)
             coordinator.update(snapshot: scan, poseStore: store, followsFacePose: true,
                                animatesAcquisition: true, in: view)
+            await coordinator.waitForPendingUpdates()
             pose = simd_float4x4(simd_quatf(angle: index == 0 ? -0.5 : 0.6,
                                           axis: SIMD3(0, 1, 0)))
             pose.columns.3 = SIMD4(index == 0 ? -0.12 : 0.25, 0.08, -0.43, 1)
@@ -91,8 +277,10 @@ final class ScanPresentationTests: XCTestCase {
             let captureDepth = -camera.simdConvertPosition(node.simdConvertPosition(center, to: nil), from: nil).z
             let capturedTransform = node.simdTransform
             coordinator.update(snapshot: scan, poseStore: store, in: view)
+            await coordinator.waitForPendingUpdates()
             XCTAssertEqual(node.simdTransform, capturedTransform, "Keep processing stable until the final data arrives.")
             coordinator.update(snapshot: scan, poseStore: store, surfaceMesh: mesh, in: view)
+            await coordinator.waitForPendingUpdates()
             let worldCenter = node.convertPosition(SCNVector3(center), to: nil)
             XCTAssertEqual(worldCenter.x, 0, accuracy: 1e-7)
             XCTAssertEqual(worldCenter.y, 0, accuracy: 1e-7)
@@ -124,7 +312,7 @@ final class ScanPresentationTests: XCTestCase {
     }
 
     @MainActor
-    func testRecenteringPreservesScanSizeWhenResultControlsReduceViewport() throws {
+    func testRecenteringPreservesScanSizeWhenResultControlsReduceViewport() async throws {
         for resizeBeforeResult in [false, true] {
             let (view, coordinator) = renderer()
             defer { coordinator.stopAnimations() }
@@ -140,17 +328,20 @@ final class ScanPresentationTests: XCTestCase {
             let scan = LivePointCloudSnapshot(revision: 7, vertices: vertices, confirmedPointCount: 3)
             coordinator.update(snapshot: scan, poseStore: store, followsFacePose: true,
                                animatesAcquisition: true, in: view)
+            await coordinator.waitForPendingUpdates()
             pose.columns.3 = SIMD4(0.16, 0.02, -0.34, 1)
             store.update(faceToCamera: pose)
             view.applyLatestFacePose()
             let node = try XCTUnwrap(view.poseNode)
             let captureSize = projectedSize(vertices: vertices, node: node, in: view)
             coordinator.update(snapshot: scan, poseStore: store, in: view)
+            await coordinator.waitForPendingUpdates()
             if resizeBeforeResult {
                 view.frame.size.height = 410
                 view.layoutIfNeeded()
             }
             coordinator.update(snapshot: scan, poseStore: store, surfaceMesh: mesh, in: view)
+            await coordinator.waitForPendingUpdates()
             if !resizeBeforeResult {
                 view.frame.size.height = 410
                 view.layoutIfNeeded()
@@ -162,7 +353,7 @@ final class ScanPresentationTests: XCTestCase {
     }
 
     @MainActor
-    func testResultArrivingBeforeFirstLayoutRetainsCaptureScale() throws {
+    func testResultArrivingBeforeFirstLayoutRetainsCaptureScale() async throws {
         let vertices = fixture()
         let mesh = ScanMesh(vertices: vertices, triangleIndices: [0, 1, 2],
                             frameCount: 5, coveredAngles: [])
@@ -170,6 +361,7 @@ final class ScanPresentationTests: XCTestCase {
         let (capture, captureCoordinator) = renderer()
         defer { captureCoordinator.stopAnimations() }
         captureCoordinator.update(snapshot: scan, in: capture)
+        await captureCoordinator.waitForPendingUpdates()
         let captureNode = try XCTUnwrap(capture.poseNode)
         let captureSize = projectedSize(vertices: vertices, node: captureNode, in: capture)
 
@@ -178,6 +370,7 @@ final class ScanPresentationTests: XCTestCase {
         defer { resultCoordinator.stopAnimations() }
         resultCoordinator.install(in: result)
         resultCoordinator.update(snapshot: scan, surfaceMesh: mesh, in: result)
+        await resultCoordinator.waitForPendingUpdates()
         result.frame = capture.frame
         result.setNeedsLayout()
         result.layoutIfNeeded()
@@ -193,12 +386,14 @@ final class ScanPresentationTests: XCTestCase {
     }
 
     @MainActor
-    func testFinalMeshArrivingAfterProcessingCentersOnceThenPreservesUserView() throws {
+    func testFinalMeshArrivingAfterProcessingCentersOnceThenPreservesUserView() async throws {
         let (view, coordinator) = renderer()
         defer { coordinator.stopAnimations() }
         let partial = LivePointCloudSnapshot(revision: 3, vertices: [fixture()[0]], confirmedPointCount: 1)
         coordinator.update(snapshot: partial, animatesAcquisition: true, in: view)
+        await coordinator.waitForPendingUpdates()
         coordinator.update(snapshot: partial, in: view)
+        await coordinator.waitForPendingUpdates()
         let camera = try XCTUnwrap(view.pointOfView)
         let processingCamera = camera.simdTransform
         let vertices = fixture().map {
@@ -207,6 +402,7 @@ final class ScanPresentationTests: XCTestCase {
         let mesh = ScanMesh(vertices: vertices, triangleIndices: [0, 1, 2],
                             frameCount: 9, coveredAngles: [])
         coordinator.update(snapshot: partial, surfaceMesh: mesh, in: view)
+        await coordinator.waitForPendingUpdates()
         XCTAssertNotEqual(camera.simdTransform, processingCamera)
         let node = try XCTUnwrap(view.scene?.rootNode.childNode(withName: "livePointCloud", recursively: false))
         let centeredTransform = node.simdTransform
@@ -220,20 +416,24 @@ final class ScanPresentationTests: XCTestCase {
         let userCamera = camera.simdTransform
         let final = LivePointCloudSnapshot(revision: 10, vertices: vertices, confirmedPointCount: 3)
         coordinator.update(snapshot: final, surfaceMesh: mesh, displayStyle: .color, in: view)
+        await coordinator.waitForPendingUpdates()
         coordinator.update(snapshot: final, surfaceMesh: mesh, displayStyle: .points, in: view)
+        await coordinator.waitForPendingUpdates()
         coordinator.update(snapshot: final, surfaceMesh: mesh, displayStyle: .points, in: view)
+        await coordinator.waitForPendingUpdates()
         XCTAssertEqual(camera.simdTransform, userCamera)
         XCTAssertEqual(node.simdTransform, centeredTransform)
     }
 
     @MainActor
-    func testNewScanReturnsFromCenteredResultToLivePoseFraming() throws {
+    func testNewScanReturnsFromCenteredResultToLivePoseFraming() async throws {
         let (view, coordinator) = renderer()
         defer { coordinator.stopAnimations() }
         let mesh = ScanMesh(vertices: fixture(), triangleIndices: [0, 1, 2],
                             frameCount: 5, coveredAngles: [])
         let snapshot = LivePointCloudSnapshot(revision: 6, vertices: mesh.vertices, confirmedPointCount: 3)
         coordinator.update(snapshot: snapshot, surfaceMesh: mesh, in: view)
+        await coordinator.waitForPendingUpdates()
         let node = try XCTUnwrap(view.scene?.rootNode.childNode(withName: "livePointCloud", recursively: false))
         XCTAssertNotEqual(node.simdTransform, matrix_identity_float4x4)
         let store = LiveFacePoseStore()
@@ -242,6 +442,7 @@ final class ScanPresentationTests: XCTestCase {
         store.update(faceToCamera: pose)
         coordinator.update(snapshot: snapshot, poseStore: store, followsFacePose: true,
                            animatesAcquisition: true, in: view)
+        await coordinator.waitForPendingUpdates()
         XCTAssertEqual(node.simdTransform, store.latestPose?.transform)
         XCTAssertEqual(view.defaultCameraController.target.x, LivePointCloudSceneView.faceCenter.x)
         XCTAssertEqual(view.defaultCameraController.target.y, LivePointCloudSceneView.faceCenter.y)
@@ -256,32 +457,39 @@ final class ScanPresentationTests: XCTestCase {
         let vertices = fixture()
         let first = LivePointCloudSnapshot(revision: 1, vertices: [vertices[0]], confirmedPointCount: 1)
         coordinator.update(snapshot: first, animatesAcquisition: true, in: view)
+        await coordinator.waitForPendingUpdates()
         let node = try XCTUnwrap(view.scene?.rootNode.childNode(withName: "livePointCloud", recursively: false))
         let firstGeometry = try XCTUnwrap(node.geometry)
         let birth = try birthTime(in: firstGeometry, index: 0)
         XCTAssertGreaterThanOrEqual(birth, 0)
         XCTAssertTrue(view.rendersContinuously)
         coordinator.update(snapshot: first, animatesAcquisition: true, in: view)
+        await coordinator.waitForPendingUpdates()
         XCTAssertTrue(node.geometry === firstGeometry)
         try await Task.sleep(for: .milliseconds(30))
         let next = LivePointCloudSnapshot(revision: 2, vertices: vertices, confirmedPointCount: 3)
         coordinator.update(snapshot: next, animatesAcquisition: true, in: view)
+        await coordinator.waitForPendingUpdates()
         let updated = try XCTUnwrap(node.geometry)
         XCTAssertEqual(try birthTime(in: updated, index: 0), birth)
         XCTAssertGreaterThan(try birthTime(in: updated, index: 1), birth)
         let cameraTransform = view.pointOfView?.simdTransform
         coordinator.update(snapshot: next, animatesAcquisition: false, in: view)
+        await coordinator.waitForPendingUpdates()
         XCTAssertEqual((updated.firstMaterial?.value(forKey: "pointFlightEnabled") as? NSNumber)?.floatValue, 0)
         XCTAssertFalse(view.rendersContinuously)
         XCTAssertFalse(view.isPlaying)
         XCTAssertTrue(node.geometry === updated)
         XCTAssertEqual(view.pointOfView?.simdTransform, cameraTransform)
         coordinator.update(snapshot: next, animatesAcquisition: true, in: view)
+        await coordinator.waitForPendingUpdates()
         XCTAssertGreaterThan(try birthTime(in: XCTUnwrap(node.geometry), index: 0), birth)
         coordinator.update(snapshot: nil, animatesAcquisition: true, in: view)
+        await coordinator.waitForPendingUpdates()
         XCTAssertNil(node.geometry)
         XCTAssertFalse(view.rendersContinuously)
         coordinator.update(snapshot: first, animatesAcquisition: true, in: view)
+        await coordinator.waitForPendingUpdates()
         XCTAssertGreaterThan(try birthTime(in: XCTUnwrap(node.geometry), index: 0), birth)
     }
 
@@ -292,6 +500,7 @@ final class ScanPresentationTests: XCTestCase {
         coordinator.update(snapshot: LivePointCloudSnapshot(revision: 1, vertices: fixture(),
                                                             confirmedPointCount: 3),
                            animatesAcquisition: true, in: view)
+        await coordinator.waitForPendingUpdates()
         XCTAssertTrue(view.rendersContinuously)
         try await Task.sleep(for: .seconds(PointCloudFlight.duration + 0.15))
         XCTAssertFalse(view.rendersContinuously)
@@ -306,10 +515,12 @@ final class ScanPresentationTests: XCTestCase {
         coordinator.update(snapshot: LivePointCloudSnapshot(revision: 1, vertices: [vertices[0]],
                                                             confirmedPointCount: 1),
                            animatesAcquisition: true, in: view)
+        await coordinator.waitForPendingUpdates()
         try await Task.sleep(for: .milliseconds(500))
         coordinator.update(snapshot: LivePointCloudSnapshot(revision: 2, vertices: vertices,
                                                             confirmedPointCount: 3),
                            animatesAcquisition: true, in: view)
+        await coordinator.waitForPendingUpdates()
         try await Task.sleep(for: .milliseconds(400))
         XCTAssertTrue(view.rendersContinuously, "The old deadline must not stop newly acquired particles.")
         try await Task.sleep(for: .milliseconds(500))
@@ -318,7 +529,7 @@ final class ScanPresentationTests: XCTestCase {
     }
 
     @MainActor
-    func testGPUFlightDoesNotRotateOrMovePointsSideways() throws {
+    func testGPUFlightDoesNotRotateOrMovePointsSideways() async throws {
         let (view, coordinator) = renderer()
         defer { coordinator.stopAnimations() }
         view.pointOfView?.camera?.usesOrthographicProjection = true
@@ -326,6 +537,7 @@ final class ScanPresentationTests: XCTestCase {
         coordinator.update(snapshot: LivePointCloudSnapshot(revision: 1, vertices: fixture(),
                                                             confirmedPointCount: 3),
                            animatesAcquisition: true, in: view)
+        await coordinator.waitForPendingUpdates()
         let node = try XCTUnwrap(view.scene?.rootNode.childNode(withName: "livePointCloud", recursively: false))
         let material = try XCTUnwrap(node.geometry?.firstMaterial)
         let birth = try birthTime(in: XCTUnwrap(node.geometry), index: 0)
@@ -352,6 +564,14 @@ final class ScanPresentationTests: XCTestCase {
         [ScanVertex(position: SIMD3(-0.04, 0.05, 0), color: SIMD3(0.9, 0.3, 0.1)),
          ScanVertex(position: SIMD3(0.04, 0.05, 0), color: SIMD3(0.2, 0.8, 0.3)),
          ScanVertex(position: SIMD3(0, -0.04, 0), color: SIMD3(0.2, 0.4, 0.9))]
+    }
+
+    private func largeFixture() -> [ScanVertex] {
+        (0..<24_000).map { index in
+            ScanVertex(position: SIMD3(Float(index % 160) * 0.001 - 0.08,
+                                       Float(index / 160) * 0.001 - 0.075, 0.01),
+                       color: SIMD3(0.3, 0.5, 0.7))
+        }
     }
 
     @MainActor
