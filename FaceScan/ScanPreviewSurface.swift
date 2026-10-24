@@ -14,12 +14,17 @@ struct ScanPreviewSurface: View {
     let showsCamera: Bool
     var poseStore: LiveFacePoseStore? = nil
     var followsFacePose = false
+    var surfaceMesh: ScanMesh? = nil
+    var displayStyle: MeshDisplayStyle = .points
+    var animatesAcquisition = false
 
     var body: some View {
         GeometryReader { geometry in
             ZStack(alignment: .topLeading) {
                 LivePointCloudView(snapshot: snapshot, poseStore: poseStore,
-                                   followsFacePose: followsFacePose)
+                                   followsFacePose: followsFacePose,
+                                   surfaceMesh: surfaceMesh, displayStyle: displayStyle,
+                                   animatesAcquisition: animatesAcquisition)
                     .frame(width: showsPointCloud ? geometry.size.width : 130,
                            height: showsPointCloud ? geometry.size.height : 155)
                     .clipShape(RoundedRectangle(cornerRadius: showsPointCloud ? 0 : 16))

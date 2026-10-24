@@ -27,6 +27,7 @@ struct ContentView: View {
     @State private var sampleMesh: ScanMesh?
     @State private var syntheticSnapshot: LivePointCloudSnapshot?
     @State private var showsLiveSample = false
+    @State private var resultStyle: MeshDisplayStyle = .points
 
     init() {
         let consent = PrivacyConsentStore()
@@ -189,7 +190,10 @@ struct ContentView: View {
                     && hasEnteredCapture && importedDocument == nil && !openingFile
                     && !showsLiveSample && scanner.phase != .unavailable,
                 poseStore: scanner.livePose,
-                followsFacePose: scanner.phase == .scanning)
+                followsFacePose: scanner.phase == .scanning,
+                surfaceMesh: mesh,
+                displayStyle: mesh == nil ? .points : resultStyle,
+                animatesAcquisition: scanner.phase == .scanning || showsLiveSample)
                 .opacity(importedDocument == nil && !openingFile ? 1 : 0)
                 .allowsHitTesting(importedDocument == nil && !openingFile)
                 .accessibilityHidden(importedDocument != nil || openingFile)
@@ -236,20 +240,8 @@ struct ContentView: View {
                     Spacer()
                 }
                 Spacer()
-                if isScanning, importedDocument == nil, !openingFile {
-                    HStack(spacing: 5) {
-                        ForEach(ScanAngle.allCases, id: \.self) { angle in
-                            Capsule()
-                                .fill(scanner.progress.coveredAngles.contains(angle)
-                                      ? ScanTheme.canvasAccent : ScanTheme.canvasTrack)
-                                .frame(height: 3)
-                        }
-                    }
-                    .accessibilityLabel("已覆盖 \(scanner.progress.coveredAngles.count) 个视角，共 7 个")
-                    .padding(.horizontal, 26)
-                    .padding(.bottom, 12)
-                }
-                if !openingFile, privacy.isAccepted || importedDocument != nil {
+                if !openingFile, !isScanning, !showsLiveSample,
+                   privacy.isAccepted || importedDocument != nil {
                     Text(stageHint)
                         .font(.system(size: 12, weight: .medium))
                         .multilineTextAlignment(.center)
@@ -283,8 +275,8 @@ struct ContentView: View {
     }
 
     private var stageHint: String {
-        if importedDocument != nil { return "拖动旋转 · 双指缩放" }
-        if mesh != nil { return savedNotice ? "已导出" : "拖动旋转 · 双指缩放" }
+        if importedDocument != nil { return "拖动旋转 · 双指缩放 · 双击重置" }
+        if mesh != nil { return savedNotice ? "已导出" : "拖动旋转 · 双指缩放 · 双击重置" }
         if !hasEnteredCapture { return "点按开始扫描，或打开 PLY 文件" }
         if showsLiveSample { return "合成点云演示" }
         if scanner.phase == .ready, scanner.errorMessage == nil { return "正对镜头 · 距离约 30–50 厘米" }
@@ -301,6 +293,13 @@ struct ContentView: View {
             primaryButton("查看隐私协议", symbol: "hand.raised") { showsPrivacy = true }
         } else if let mesh {
             VStack(spacing: 10) {
+                Picker("", selection: $resultStyle) {
+                    Text("点云").tag(MeshDisplayStyle.points)
+                    Text("原色").tag(MeshDisplayStyle.color)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .accessibilityLabel("显示方式")
                 primaryButton(exporting ? "正在导出…" : "导出 PLY", symbol: "square.and.arrow.up") {
                     export(mesh)
                 }
@@ -357,6 +356,7 @@ struct ContentView: View {
 
     private func beginScan() {
         guard privacy.isAccepted else { showsPrivacy = true; return }
+        resultStyle = .points
         hasEnteredCapture = true
         wantsToScan = true
         scanner.allowCaptureAfterFileViewing()
@@ -370,6 +370,7 @@ struct ContentView: View {
     }
 
     private func restart() {
+        resultStyle = .points
         hasEnteredCapture = true
         wantsToScan = false
         sampleMesh = nil
@@ -381,6 +382,7 @@ struct ContentView: View {
     }
 
     private func revokeConsent() {
+        resultStyle = .points
         privacy.revoke()
         scanner.stop()
         cancelExport()

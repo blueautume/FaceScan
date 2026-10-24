@@ -209,7 +209,7 @@ final class LivePointCloudRendererTests: XCTestCase {
     }
 
     @MainActor
-    func testInitialFramingIncludesExpandedFaceAndIsIndependentOfFirstPoint() throws {
+    func testInitialMagnifiedFramingIsIndependentOfFirstPoint() throws {
         let view = LivePointCloudSceneView(frame: CGRect(x: 0, y: 0, width: 340, height: 500))
         let coordinator = LivePointCloudView.Coordinator()
         coordinator.install(in: view)
@@ -222,9 +222,63 @@ final class LivePointCloudRendererTests: XCTestCase {
         for point: SCNVector3 in [SCNVector3(0, 0.18, 0), SCNVector3(0, -0.14, 0),
                                  SCNVector3(-0.125, 0, -0.1), SCNVector3(0.125, 0, -0.1)] {
             let projected = view.projectPoint(point)
-            XCTAssertTrue((0...Float(view.bounds.width)).contains(projected.x), "Ear-front ROI must fit horizontally.")
-            XCTAssertTrue((0...Float(view.bounds.height)).contains(projected.y), "Forehead/chin ROI must fit vertically.")
+            // Deliberate magnification may crop the expanded acquisition ROI.
+            // Its measurements must still retain a finite, valid depth projection.
+            XCTAssertTrue(projected.x.isFinite)
+            XCTAssertTrue(projected.y.isFinite)
             XCTAssertTrue((0...1).contains(projected.z))
+        }
+        for point: SCNVector3 in [SCNVector3(-0.06, 0.03, 0.02), SCNVector3(0.06, 0.03, 0.02),
+                                 SCNVector3(0, 0.10, 0.04), SCNVector3(0, -0.08, 0.02)] {
+            let projected = view.projectPoint(point)
+            XCTAssertTrue((0...Float(view.bounds.width)).contains(projected.x), "Central facial features must remain visible.")
+            XCTAssertTrue((0...Float(view.bounds.height)).contains(projected.y), "Central facial features must remain visible.")
+        }
+    }
+
+    @MainActor
+    func testCaptureProjectionMagnifiesBothAxesByOnePointSevenAtMultipleDepths() throws {
+        for size in [CGSize(width: 340, height: 500), CGSize(width: 360, height: 620)] {
+            let frame = CGRect(origin: .zero, size: size)
+            let view = LivePointCloudSceneView(frame: frame)
+            let coordinator = LivePointCloudView.Coordinator()
+            coordinator.install(in: view)
+            let cameraNode = try XCTUnwrap(view.pointOfView)
+            let camera = try XCTUnwrap(cameraNode.camera)
+
+            // Keep camera placement and clipping planes identical. Compare actual
+            // screen projections with the previous 38-degree vertical lens, rather
+            // than merely checking the configured field-of-view number.
+            let baseline = SCNView(frame: frame)
+            let baselineScene = SCNScene()
+            let baselineCameraNode = SCNNode()
+            let baselineCamera = SCNCamera()
+            baselineCamera.projectionDirection = .vertical
+            baselineCamera.fieldOfView = 38
+            baselineCamera.zNear = camera.zNear
+            baselineCamera.zFar = camera.zFar
+            baselineCameraNode.camera = baselineCamera
+            baselineCameraNode.simdTransform = cameraNode.simdTransform
+            baselineScene.rootNode.addChildNode(baselineCameraNode)
+            baseline.scene = baselineScene
+            baseline.pointOfView = baselineCameraNode
+
+            let screenCenter = SIMD2<Float>(Float(size.width / 2), Float(size.height / 2))
+            for depth: Float in [-0.09, -0.005, 0.075] {
+                for offset: SIMD2<Float> in [SIMD2(-0.05, 0.04), SIMD2(0.06, -0.05), SIMD2(0.02, 0.07)] {
+                    let point = SCNVector3(offset.x, 0.025 + offset.y, depth)
+                    let original = baseline.projectPoint(point)
+                    let magnified = view.projectPoint(point)
+                    XCTAssertEqual(magnified.x - screenCenter.x,
+                                   (original.x - screenCenter.x) * 1.7, accuracy: 0.02,
+                                   "Horizontal size must increase 1.7× at every face depth.")
+                    XCTAssertEqual(magnified.y - screenCenter.y,
+                                   (original.y - screenCenter.y) * 1.7, accuracy: 0.02,
+                                   "Vertical size must increase 1.7× at every face depth.")
+                    XCTAssertEqual(magnified.z, original.z, accuracy: 0.00001,
+                                   "Display magnification must leave depth projection unchanged.")
+                }
+            }
         }
     }
 

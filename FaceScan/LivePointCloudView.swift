@@ -9,6 +9,9 @@ struct LivePointCloudView: UIViewRepresentable {
     let snapshot: LivePointCloudSnapshot?
     var poseStore: LiveFacePoseStore? = nil
     var followsFacePose = false
+    var surfaceMesh: ScanMesh? = nil
+    var displayStyle: MeshDisplayStyle = .points
+    var animatesAcquisition = false
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -26,30 +29,47 @@ struct LivePointCloudView: UIViewRepresentable {
         view.isAccessibilityElement = true
         context.coordinator.install(in: view)
         context.coordinator.update(snapshot: snapshot, poseStore: poseStore,
-                                   followsFacePose: followsFacePose, in: view)
+                                   followsFacePose: followsFacePose, surfaceMesh: surfaceMesh,
+                                   displayStyle: displayStyle, animatesAcquisition: animatesAcquisition,
+                                   in: view)
         return view
     }
 
     func updateUIView(_ uiView: SCNView, context: Context) {
         context.coordinator.update(snapshot: snapshot, poseStore: poseStore,
-                                   followsFacePose: followsFacePose, in: uiView)
+                                   followsFacePose: followsFacePose, surfaceMesh: surfaceMesh,
+                                   displayStyle: displayStyle, animatesAcquisition: animatesAcquisition,
+                                   in: uiView)
     }
 
     static func dismantleUIView(_ uiView: SCNView, coordinator: Coordinator) {
         (uiView as? LivePointCloudSceneView)?.stopPoseUpdates()
+        coordinator.stopAnimations()
     }
 
     @MainActor
     final class Coordinator {
         private let pointNode = SCNNode()
         private let cameraNode = SCNNode()
-        private var displayedRevision: Int?
+        private var displayedContent: DisplayedContent?
         private var isFollowingFacePose = false
+        private var isAcquiring = false
+        private var hasPresentedResult = false
+        private var flight: PointCloudFlight?
+
+        private struct DisplayedContent: Equatable {
+            let revision: Int?
+            let style: MeshDisplayStyle
+            let meshFrameCount: Int?
+            let meshVertexCount: Int?
+            let meshIndexCount: Int?
+        }
 
         func install(in view: SCNView) {
             let scene = SCNScene()
             pointNode.name = "livePointCloud"
             scene.rootNode.addChildNode(pointNode)
+            flight = PointCloudFlight(view: view)
             (view as? LivePointCloudSceneView)?.poseNode = pointNode
 
             let camera = SCNCamera()
@@ -76,12 +96,15 @@ struct LivePointCloudView: UIViewRepresentable {
         }
 
         func update(snapshot: LivePointCloudSnapshot?, poseStore: LiveFacePoseStore? = nil,
-                    followsFacePose: Bool = false, in view: SCNView) {
+                    followsFacePose: Bool = false, surfaceMesh: ScanMesh? = nil,
+                    displayStyle: MeshDisplayStyle = .points,
+                    animatesAcquisition: Bool = false, in view: SCNView) {
             let isFollowing = followsFacePose && poseStore != nil
             if isFollowing, !isFollowingFacePose {
                 // A new scan always starts from the camera's front view, even
                 // if the previous finished scan was manually orbited.
                 pointNode.simdTransform = matrix_identity_float4x4
+                hasPresentedResult = false
                 resetCamera(in: view)
             }
             isFollowingFacePose = isFollowing
@@ -96,13 +119,51 @@ struct LivePointCloudView: UIViewRepresentable {
                 view.accessibilityLabel = "实时点云，等待扫描数据"
             }
 
-            // SwiftUI also updates for hints, counters, and camera frames. Only upload a new revision.
-            guard snapshot?.revision != displayedRevision else { return }
-            displayedRevision = snapshot?.revision
+            let startsAcquisition = animatesAcquisition && !isAcquiring
+            let rewindsSnapshot: Bool
+            if let previous = displayedContent?.revision, let revision = snapshot?.revision {
+                rewindsSnapshot = revision < previous
+            } else {
+                rewindsSnapshot = false
+            }
+            if startsAcquisition || rewindsSnapshot {
+                flight?.reset()
+                if hasPresentedResult {
+                    pointNode.simdTransform = matrix_identity_float4x4
+                    resetCamera(in: view)
+                }
+                hasPresentedResult = false
+            } else if !animatesAcquisition && isAcquiring {
+                flight?.finish()
+            }
+            isAcquiring = animatesAcquisition
+            if let surfaceMesh, !animatesAcquisition, !isFollowing, !hasPresentedResult {
+                // The final mesh arrives after processing. Its display must no longer
+                // inherit a camera-relative head translation or the last captured angle.
+                flight?.finish()
+                hasPresentedResult = (view as? LivePointCloudSceneView)?.centerCompletedResult(
+                    vertices: surfaceMesh.vertices, cameraNode: cameraNode) ?? false
+            }
+            let content = DisplayedContent(revision: snapshot?.revision, style: displayStyle,
+                meshFrameCount: surfaceMesh?.frameCount, meshVertexCount: surfaceMesh?.vertexCount,
+                meshIndexCount: surfaceMesh?.triangleIndices.count)
+            // UI-only updates retain GPU buffers and the user's result-view camera.
+            guard content != displayedContent || startsAcquisition else { return }
+            displayedContent = content
             SCNTransaction.begin()
             SCNTransaction.disableActions = true
-            pointNode.geometry = snapshot.flatMap { LivePointGeometryBuilder.makeGeometry(vertices: $0.vertices) }
-            if snapshot == nil {
+            let vertices = surfaceMesh?.vertices ?? snapshot?.vertices ?? []
+            if displayStyle == .color, let surfaceMesh, !animatesAcquisition {
+                flight?.finish()
+                pointNode.geometry = LivePointGeometryBuilder.makeSurfaceGeometry(mesh: surfaceMesh)
+            } else if animatesAcquisition {
+                pointNode.geometry = flight?.makeGeometry(vertices: vertices)
+            } else {
+                pointNode.geometry = LivePointGeometryBuilder.makeGeometry(vertices: vertices)
+            }
+            if snapshot == nil && surfaceMesh == nil {
+                flight?.reset()
+                hasPresentedResult = false
                 pointNode.simdTransform = matrix_identity_float4x4
                 resetCamera(in: view)
             }
@@ -110,12 +171,12 @@ struct LivePointCloudView: UIViewRepresentable {
             view.setNeedsDisplay()
         }
 
+        func stopAnimations() { flight?.reset() }
+
         private func resetCamera(in view: SCNView) {
             view.defaultCameraController.stopInertia()
             if let liveView = view as? LivePointCloudSceneView {
-                liveView.fitCameraNode = cameraNode
-                liveView.needsInitialFit = true
-                liveView.fitCameraIfNeeded()
+                liveView.prepareCaptureCamera(cameraNode)
             }
         }
     }
@@ -129,11 +190,7 @@ enum LivePointGeometryBuilder {
         for vertex in vertices {
             let p = vertex.position
             let c = vertex.color
-            guard p.x.isFinite, p.y.isFinite, p.z.isFinite,
-                  c.x.isFinite, c.y.isFinite, c.z.isFinite,
-                  // A face-local observation cannot be meters away from the head origin.
-                  abs(p.x) <= 2, abs(p.y) <= 2, abs(p.z) <= 2,
-                  (0...1).contains(c.x), (0...1).contains(c.y), (0...1).contains(c.z) else { continue }
+            guard isRenderable(vertex) else { continue }
             values.append(p.x)
             values.append(p.y)
             values.append(p.z)
@@ -168,15 +225,55 @@ enum LivePointGeometryBuilder {
         geometry.materials = [material]
         return geometry
     }
+
+    static func isRenderable(_ vertex: ScanVertex) -> Bool {
+        let p = vertex.position
+        let c = vertex.color
+        return p.x.isFinite && p.y.isFinite && p.z.isFinite
+            && c.x.isFinite && c.y.isFinite && c.z.isFinite
+            && abs(p.x) <= 2 && abs(p.y) <= 2 && abs(p.z) <= 2
+            && (0...1).contains(c.x) && (0...1).contains(c.y) && (0...1).contains(c.z)
+    }
+
+    /// Only measured triangles are drawn. A scan without faces remains a valid colored point cloud.
+    static func makeSurfaceGeometry(mesh: ScanMesh) -> SCNGeometry? {
+        var remap = [Int](repeating: -1, count: mesh.vertices.count)
+        var vertices: [ScanVertex] = []
+        vertices.reserveCapacity(mesh.vertices.count)
+        for (index, vertex) in mesh.vertices.enumerated() where isRenderable(vertex) {
+            remap[index] = vertices.count
+            vertices.append(vertex)
+        }
+        guard let points = makeGeometry(vertices: vertices) else { return nil }
+        var indices: [UInt32] = []
+        indices.reserveCapacity(mesh.triangleIndices.count)
+        for offset in stride(from: 0, to: mesh.triangleIndices.count - mesh.triangleIndices.count % 3, by: 3) {
+            let original = mesh.triangleIndices[offset..<(offset + 3)].map(Int.init)
+            guard original.allSatisfy({ remap.indices.contains($0) && remap[$0] >= 0 }) else { continue }
+            let a = remap[original[0]], b = remap[original[1]], c = remap[original[2]]
+            guard a != b, b != c, a != c,
+                  simd_length_squared(simd_cross(vertices[b].position - vertices[a].position,
+                                                 vertices[c].position - vertices[a].position)) > 1e-16 else { continue }
+            indices.append(contentsOf: [UInt32(a), UInt32(b), UInt32(c)])
+        }
+        guard !indices.isEmpty else { return points }
+        let geometry = SCNGeometry(sources: points.sources,
+            elements: [SCNGeometryElement(indices: indices, primitiveType: .triangles)])
+        geometry.materials = points.materials
+        return geometry
+    }
 }
 
-/// Fit one fixed facial volume after layout, then preserve orbit and zoom between snapshots.
-/// In particular, a sparse first frame must not zoom into a cheek and jump out as new points arrive.
+/// Capture uses one fixed facial volume. Completion centers that volume without
+/// changing its display scale; subsequent updates preserve the user's orbit and zoom.
 final class LivePointCloudSceneView: SCNView {
     static let faceCenter = SCNVector3(0, 0.025, -0.005)
+    private static let displayMagnification: Float = 1.7
     weak var fitCameraNode: SCNNode?
     weak var poseNode: SCNNode?
     var needsInitialFit = false
+    private var completedCaptureCenter: SIMD3<Float>?
+    private var completedCameraDepth: Float?
     private var poseStore: LiveFacePoseStore?
     private var followsFacePose = false
     private var displayedPoseRevision: UInt64?
@@ -223,6 +320,46 @@ final class LivePointCloudSceneView: SCNView {
         poseDisplayLink = nil
     }
 
+    func prepareCaptureCamera(_ cameraNode: SCNNode) {
+        completedCaptureCenter = nil
+        completedCameraDepth = nil
+        cameraNode.camera?.zFar = 5
+        fitCameraNode = cameraNode
+        needsInitialFit = true
+        fitCameraIfNeeded()
+    }
+
+    /// Center a display node, not its source vertices, so exported coordinates
+    /// retain their original face-local metric frame.
+    @discardableResult
+    func centerCompletedResult(vertices: [ScanVertex], cameraNode: SCNNode) -> Bool {
+        var low = SIMD3<Float>(repeating: .infinity)
+        var high = SIMD3<Float>(repeating: -.infinity)
+        for vertex in vertices where LivePointGeometryBuilder.isRenderable(vertex) {
+            low = simd_min(low, vertex.position)
+            high = simd_max(high, vertex.position)
+        }
+        guard low.x.isFinite, let poseNode else { return false }
+        let center = (low + high) * 0.5
+        let captureCenter = poseNode.simdConvertPosition(center, to: nil)
+        completedCaptureCenter = captureCenter
+        // Preserve perspective magnification at the face, including any forward
+        // movement during capture. Lateral drift must not increase this distance.
+        completedCameraDepth = needsInitialFit ? nil
+            : -cameraNode.simdConvertPosition(captureCenter, from: nil).z
+        defaultCameraController.stopInertia()
+        SCNTransaction.begin()
+        SCNTransaction.disableActions = true
+        poseNode.simdTransform = matrix_identity_float4x4
+        poseNode.simdPosition = -center
+        fitCameraNode = cameraNode
+        needsInitialFit = true
+        fitCameraIfNeeded()
+        SCNTransaction.commit()
+        setNeedsDisplay()
+        return true
+    }
+
     private func updatePoseDisplayLink() {
         guard followsFacePose, window != nil else {
             stopPoseUpdates()
@@ -245,14 +382,38 @@ final class LivePointCloudSceneView: SCNView {
         guard needsInitialFit, bounds.width > 0, bounds.height > 0,
               let cameraNode = fitCameraNode, let camera = cameraNode.camera else { return }
         let aspect = Float(bounds.width / bounds.height)
-        let halfAngle = Float(camera.fieldOfView) * .pi / 360
-        // Stable 30 cm height plus margin includes the enlarged forehead, chin, and ear-front ROI.
-        let verticalDistance: Float = 0.15 / tan(halfAngle)
-        let horizontalDistance: Float = 0.14 / (tan(halfAngle) * aspect)
-        let distance = max(verticalDistance, horizontalDistance) * 1.18 + 0.10
-        let center = SIMD3<Float>(0, 0.025, -0.005)
-        cameraNode.simdPosition = center + SIMD3(0, 0, distance)
-        cameraNode.look(at: Self.faceCenter)
+        if completedCameraDepth == nil {
+            let halfAngle: Float = 38 * .pi / 360
+            // Lock the equivalent horizontal projection. Result controls reduce
+            // stage height, but must not make the face smaller on screen.
+            camera.projectionDirection = .horizontal
+            camera.fieldOfView = CGFloat(2 * atan(tan(halfAngle) * aspect / Self.displayMagnification) * 180 / .pi)
+            // Retain the capture distance; magnify only the projection so depth
+            // and the completed result's scale remain consistent with scanning.
+            let verticalDistance: Float = 0.15 / tan(halfAngle)
+            let horizontalDistance: Float = 0.14 / (tan(halfAngle) * aspect)
+            let distance = max(verticalDistance, horizontalDistance) * 1.18 + 0.10
+            let center = SIMD3<Float>(0, 0.025, -0.005)
+            cameraNode.simdPosition = center + SIMD3(0, 0, distance)
+            cameraNode.look(at: Self.faceCenter)
+        }
+        if let captureCenter = completedCaptureCenter {
+            // A result may arrive before the first layout (for example a sample).
+            // In that case derive its depth after preparing the capture camera.
+            let depth = completedCameraDepth
+                ?? -cameraNode.simdConvertPosition(captureCenter, from: nil).z
+            let distance = max(depth, Float(camera.zNear) * 2)
+            completedCameraDepth = distance
+            cameraNode.simdPosition = SIMD3(0, 0, distance)
+            cameraNode.look(at: SCNVector3Zero)
+            // Refresh both home-view references. SceneKit's built-in double-tap
+            // reset must use the completed model's centered camera.
+            pointOfView = cameraNode
+            defaultCameraController.pointOfView = cameraNode
+            defaultCameraController.target = SCNVector3Zero
+            needsInitialFit = false
+            return
+        }
         pointOfView = cameraNode
         defaultCameraController.pointOfView = cameraNode
         defaultCameraController.target = Self.faceCenter
