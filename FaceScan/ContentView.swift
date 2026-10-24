@@ -27,6 +27,12 @@ struct ContentView: View {
     @State private var sampleMesh: ScanMesh?
     @State private var syntheticSnapshot: LivePointCloudSnapshot?
     @State private var showsLiveSample = false
+    @State private var labSettings = ScanLabSettings()
+    @State private var showsLabPanel = false
+    @State private var labReplayToken = 0
+    @State private var labSampleRun = UUID()
+    @State private var labDemoDocument: PLYDocument?
+    @State private var labDemoMesh: ScanMesh?
 
     init() {
         let consent = PrivacyConsentStore()
@@ -34,7 +40,14 @@ struct ContentView: View {
         _scanner = StateObject(wrappedValue: FaceScanController(privacyConsent: consent))
     }
 
-    private var mesh: ScanMesh? { sampleMesh ?? scanner.result }
+    private var mesh: ScanMesh? { showsLiveSample ? nil : (sampleMesh ?? scanner.result) }
+    private var activeLabSettings: ScanLabSettings? {
+        #if DEBUG
+        labSettings
+        #else
+        nil
+        #endif
+    }
     private var isScanning: Bool { scanner.phase == .scanning || scanner.phase == .processing }
     private var showsPoints: Bool { isScanning || mesh != nil || showsLiveSample }
     private var snapshot: LivePointCloudSnapshot? {
@@ -44,6 +57,17 @@ struct ContentView: View {
     private var usesCaptureCanvas: Bool {
         !openingFile && (importedDocument != nil || showsPoints
             || privacy.isAccepted && hasEnteredCapture && scanner.phase != .unavailable)
+    }
+    private var canvasHUDColor: Color {
+        activeLabSettings?.background == .light ? ScanTheme.primary : ScanTheme.canvasAccent
+    }
+    private var labStatus: String {
+        let count = importedDocument?.mesh.vertexCount ?? snapshot?.pointCount ?? 0
+        let source = importedDocument?.mesh ?? (showsLiveSample ? labDemoMesh : mesh)
+        let meshLabel = source?.triangleIndices.isEmpty == false ? "源三角面" : "邻接预览网格"
+        let hasSurface = labSettings.displayMode != .points || labSettings.meshEnabled
+        return "LAB · \(labSettings.displayMode.title) · 输入 \(count) 点"
+            + (hasSurface ? "\n\(meshLabel) · 仅影响显示" : "\n滤波与特效仅影响显示")
     }
 
     var body: some View {
@@ -55,6 +79,17 @@ struct ContentView: View {
                     .lineLimit(1)
                     .truncationMode(.middle)
                 Spacer()
+                #if DEBUG
+                Button {
+                    showsLabPanel = true
+                } label: {
+                    Image(systemName: "slider.horizontal.3")
+                        .font(.system(size: 17))
+                        .frame(width: 44, height: 44)
+                }
+                .accessibilityLabel("效果实验调节")
+                .disabled(exporting || openingFile)
+                #endif
                 Button {
                     wantsToScan = false
                     scanner.suspendCaptureForFileViewing()
@@ -83,6 +118,9 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .layoutPriority(1)
 
+            #if DEBUG
+            labQuickControls
+            #endif
             controls
         }
         .padding(.horizontal, 22)
@@ -160,17 +198,42 @@ struct ContentView: View {
                 .ignoresSafeArea()
             }
         }
-        .task(id: showsLiveSample) {
+        .sheet(isPresented: $showsLabPanel) {
+            ScanLabPanel(settings: $labSettings, onReplay: {
+                labReplayToken += 1
+            }, onDemo: startLabDemo)
+                .presentationDetents([.height(340), .large])
+                .presentationDragIndicator(.visible)
+                .presentationBackgroundInteraction(.enabled(upThrough: .height(340)))
+        }
+        .onChange(of: labSettings.demoNoise) { _, _ in
+            if showsLiveSample {
+                labDemoMesh = nil
+                syntheticSnapshot = nil
+                labSampleRun = UUID()
+            }
+        }
+        .task(id: showsLiveSample ? labSampleRun : nil) {
             guard showsLiveSample else { return }
-            let points = SampleFaceMesh.make().vertices.sorted { abs($0.position.x) < abs($1.position.x) }
-            for revision in 1...40 {
+            let amplitude = labSettings.demoNoise
+            let fixture = await Task.detached(priority: .userInitiated) {
+                ScanLabDemo.mesh(noise: amplitude)
+            }.value
+            guard !Task.isCancelled else { return }
+            let points = fixture.vertices
+            for revision in 1...60 {
                 guard !Task.isCancelled else { return }
-                let count = points.count * revision / 40
+                let count = points.count * revision / 60
                 syntheticSnapshot = LivePointCloudSnapshot(
                     revision: revision, vertices: Array(points.prefix(count)),
                     confirmedPointCount: count, isSample: true)
-                try? await Task.sleep(for: .milliseconds(180))
+                try? await Task.sleep(for: .milliseconds(140))
             }
+            if labSettings.flyInEnabled {
+                try? await Task.sleep(for: .seconds(labSettings.flyInDuration + labSettings.flyInStagger))
+            }
+            guard !Task.isCancelled else { return }
+            labDemoMesh = fixture
         }
         .alert(errorTitle, isPresented: Binding(
             get: { exportError != nil }, set: { if !$0 { exportError = nil } }
@@ -187,15 +250,22 @@ struct ContentView: View {
                 showsPointCloud: showsPoints, hasLiveStage: showsPoints,
                 showsCamera: privacy.isAccepted && !showsPrivacy && mesh == nil
                     && hasEnteredCapture && importedDocument == nil && !openingFile
-                    && !showsLiveSample && scanner.phase != .unavailable,
+                    && !showsLiveSample && scanner.phase != .unavailable
+                    && (activeLabSettings?.showCameraPreview ?? true),
                 poseStore: scanner.livePose,
-                followsFacePose: scanner.phase == .scanning)
+                followsFacePose: scanner.phase == .scanning && !showsLiveSample,
+                labSettings: importedDocument == nil && !openingFile ? activeLabSettings : nil,
+                surfaceMesh: showsLiveSample ? labDemoMesh : mesh,
+                animatesAcquisition: scanner.phase == .scanning
+                    || (showsLiveSample && labDemoMesh == nil),
+                replayToken: labReplayToken)
                 .opacity(importedDocument == nil && !openingFile ? 1 : 0)
                 .allowsHitTesting(importedDocument == nil && !openingFile)
                 .accessibilityHidden(importedDocument != nil || openingFile)
 
             if let document = importedDocument {
-                PLYViewerView(id: viewerID, mesh: document.mesh)
+                PLYViewerView(id: viewerID, mesh: document.mesh,
+                              labSettings: activeLabSettings, replayToken: labReplayToken)
                     .allowsHitTesting(!openingFile)
             } else if !privacy.isAccepted || scanner.phase == .unavailable || !hasEnteredCapture && !showsPoints {
                 ScanTheme.surface
@@ -230,18 +300,28 @@ struct ContentView: View {
                     if importedDocument == nil, !openingFile, isScanning || showsLiveSample {
                         Circle().fill(ScanTheme.canvasAccent).frame(width: 5, height: 5)
                     }
-                    Text(stageLabel)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(usesCaptureCanvas ? ScanTheme.canvasAccent : ScanTheme.tint)
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(stageLabel)
+                            .font(.system(size: 11, weight: .medium))
+                        #if DEBUG
+                        if labSettings.showStats, usesCaptureCanvas {
+                            Text(labStatus)
+                                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                .lineLimit(2)
+                        }
+                        #endif
+                    }
+                    .foregroundStyle(usesCaptureCanvas ? canvasHUDColor : ScanTheme.tint)
                     Spacer()
                 }
                 Spacer()
-                if isScanning, importedDocument == nil, !openingFile {
+                if isScanning, importedDocument == nil, !openingFile,
+                   activeLabSettings?.showCoverage ?? true {
                     HStack(spacing: 5) {
                         ForEach(ScanAngle.allCases, id: \.self) { angle in
                             Capsule()
                                 .fill(scanner.progress.coveredAngles.contains(angle)
-                                      ? ScanTheme.canvasAccent : ScanTheme.canvasTrack)
+                                      ? canvasHUDColor : ScanTheme.canvasTrack)
                                 .frame(height: 3)
                         }
                     }
@@ -285,8 +365,8 @@ struct ContentView: View {
     private var stageHint: String {
         if importedDocument != nil { return "拖动旋转 · 双指缩放" }
         if mesh != nil { return savedNotice ? "已导出" : "拖动旋转 · 双指缩放" }
+        if showsLiveSample { return "合成扫描演示 · 拖动旋转 · 双指缩放" }
         if !hasEnteredCapture { return "点按开始扫描，或打开 PLY 文件" }
-        if showsLiveSample { return "合成点云演示" }
         if scanner.phase == .ready, scanner.errorMessage == nil { return "正对镜头 · 距离约 30–50 厘米" }
         return scanner.errorMessage ?? scanner.hint
     }
@@ -312,7 +392,7 @@ struct ContentView: View {
                     .disabled(exporting)
             }
         } else if showsLiveSample {
-            primaryButton("结束演示", symbol: "stop.fill") { restart() }
+            primaryButton("结束演示", symbol: "stop.fill") { endLabDemo() }
         } else if scanner.phase == .scanning {
             primaryButton("停止扫描", symbol: "stop.fill") { scanner.finishScan() }
         } else if scanner.phase == .processing {
@@ -335,9 +415,100 @@ struct ContentView: View {
         .buttonStyle(ScanPrimaryButton())
     }
 
+    #if DEBUG
+    private var labQuickControls: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    labChip("飞入", symbol: "sparkles", isOn: labSettings.flyInEnabled) {
+                        labSettings.flyInEnabled.toggle()
+                    }
+                    labChip("滤波", symbol: "waveform.path", isOn: labSettings.filterEnabled) {
+                        labSettings.filterEnabled.toggle()
+                    }
+                    labChip("线框", symbol: "square.3.layers.3d", isOn: labSettings.meshEnabled) {
+                        labSettings.meshEnabled.toggle()
+                    }
+                    Menu {
+                        Picker("展示形式", selection: $labSettings.displayMode) {
+                            ForEach(ScanLabDisplayMode.allCases) { mode in
+                                Text(mode.title).tag(mode)
+                            }
+                        }
+                    } label: {
+                        Label(labSettings.displayMode.title, systemImage: "cube.transparent")
+                            .font(.system(size: 12, weight: .medium))
+                            .padding(.horizontal, 13)
+                            .frame(height: 38)
+                            .background(ScanTheme.surface, in: Capsule())
+                    }
+                    Button(action: startLabDemo) {
+                        Label("演示", systemImage: "play.fill")
+                            .font(.system(size: 12, weight: .medium))
+                            .padding(.horizontal, 13)
+                            .frame(height: 38)
+                            .background(ScanTheme.surface, in: Capsule())
+                    }
+                    .disabled(exporting || openingFile)
+                }
+            }
+            Text("临时快捷开关 · 右上角滑杆可展开全部参数与说明")
+                .font(.system(size: 10))
+                .foregroundStyle(ScanTheme.secondary)
+        }
+    }
+
+    private func labChip(_ title: String, symbol: String, isOn: Bool,
+                         action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: symbol)
+                .font(.system(size: 12, weight: .medium))
+                .padding(.horizontal, 13)
+                .frame(height: 38)
+                .background(isOn ? ScanTheme.accent : ScanTheme.surface, in: Capsule())
+        }
+        .accessibilityValue(isOn ? "已开启" : "已关闭")
+    }
+    #endif
+
+    private func startLabDemo() {
+        showsLabPanel = false
+        guard privacy.isAccepted else { showsPrivacy = true; return }
+        wantsToScan = false
+        if !showsLiveSample { labDemoDocument = importedDocument }
+        importedDocument = nil
+        scanner.suspendCaptureForFileViewing()
+        syntheticSnapshot = nil
+        labDemoMesh = nil
+        showsLiveSample = true
+        labSampleRun = UUID()
+        savedNotice = false
+    }
+
+    private func endLabDemo() {
+        showsLiveSample = false
+        syntheticSnapshot = nil
+        labDemoMesh = nil
+        if let document = labDemoDocument {
+            importedDocument = document
+            viewerID = UUID()
+            labDemoDocument = nil
+        } else {
+            scanner.allowCaptureAfterFileViewing()
+            if hasEnteredCapture, mesh == nil { scanner.prepare() }
+        }
+    }
+
     private func prepareCapture() {
         guard privacy.isAccepted, importedDocument == nil, !openingFile else { return }
         #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--lab-panel") {
+            showsLabPanel = true
+        }
+        if ProcessInfo.processInfo.arguments.contains("--lab-demo") {
+            startLabDemo()
+            return
+        }
         if ProcessInfo.processInfo.arguments.contains("--sample") {
             let sample = SampleFaceMesh.make()
             sampleMesh = sample
@@ -376,6 +547,8 @@ struct ContentView: View {
         finalSnapshot = nil
         syntheticSnapshot = nil
         showsLiveSample = false
+        labDemoDocument = nil
+        labDemoMesh = nil
         savedNotice = false
         scanner.reset()
     }
@@ -398,6 +571,9 @@ struct ContentView: View {
         finalSnapshot = nil
         syntheticSnapshot = nil
         showsLiveSample = false
+        labDemoDocument = nil
+        labDemoMesh = nil
+        showsLabPanel = false
         savedNotice = false
         showsPrivacy = false
     }
@@ -444,6 +620,15 @@ struct ContentView: View {
     }
 
     private func openFile(_ url: URL) {
+        if showsLiveSample, let document = labDemoDocument {
+            importedDocument = document
+            viewerID = UUID()
+        }
+        showsLiveSample = false
+        syntheticSnapshot = nil
+        labDemoMesh = nil
+        labDemoDocument = nil
+        showsLabPanel = false
         pickerGeneration = UUID()
         choosingFile = false
         wantsToScan = false
@@ -487,7 +672,7 @@ struct ContentView: View {
     }
 
     private func restoreCapture() {
-        guard importedDocument == nil, !openingFile else { return }
+        guard importedDocument == nil, !openingFile, !showsLiveSample else { return }
         scanner.allowCaptureAfterFileViewing()
         if hasEnteredCapture, privacy.isAccepted { scanner.prepare() }
     }

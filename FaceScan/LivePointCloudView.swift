@@ -9,6 +9,10 @@ struct LivePointCloudView: UIViewRepresentable {
     let snapshot: LivePointCloudSnapshot?
     var poseStore: LiveFacePoseStore? = nil
     var followsFacePose = false
+    var labSettings: ScanLabSettings? = nil
+    var surfaceMesh: ScanMesh? = nil
+    var animatesAcquisition = false
+    var replayToken = 0
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -26,17 +30,22 @@ struct LivePointCloudView: UIViewRepresentable {
         view.isAccessibilityElement = true
         context.coordinator.install(in: view)
         context.coordinator.update(snapshot: snapshot, poseStore: poseStore,
-                                   followsFacePose: followsFacePose, in: view)
+                                   followsFacePose: followsFacePose, labSettings: labSettings,
+                                   surfaceMesh: surfaceMesh, animatesAcquisition: animatesAcquisition,
+                                   replayToken: replayToken, in: view)
         return view
     }
 
     func updateUIView(_ uiView: SCNView, context: Context) {
         context.coordinator.update(snapshot: snapshot, poseStore: poseStore,
-                                   followsFacePose: followsFacePose, in: uiView)
+                                   followsFacePose: followsFacePose, labSettings: labSettings,
+                                   surfaceMesh: surfaceMesh, animatesAcquisition: animatesAcquisition,
+                                   replayToken: replayToken, in: uiView)
     }
 
     static func dismantleUIView(_ uiView: SCNView, coordinator: Coordinator) {
         (uiView as? LivePointCloudSceneView)?.stopPoseUpdates()
+        coordinator.stopLab()
     }
 
     @MainActor
@@ -45,6 +54,7 @@ struct LivePointCloudView: UIViewRepresentable {
         private let cameraNode = SCNNode()
         private var displayedRevision: Int?
         private var isFollowingFacePose = false
+        private var labRenderer: ScanLabRenderer?
 
         func install(in view: SCNView) {
             let scene = SCNScene()
@@ -76,7 +86,9 @@ struct LivePointCloudView: UIViewRepresentable {
         }
 
         func update(snapshot: LivePointCloudSnapshot?, poseStore: LiveFacePoseStore? = nil,
-                    followsFacePose: Bool = false, in view: SCNView) {
+                    followsFacePose: Bool = false, labSettings: ScanLabSettings? = nil,
+                    surfaceMesh: ScanMesh? = nil, animatesAcquisition: Bool = false,
+                    replayToken: Int = 0, in view: SCNView) {
             let isFollowing = followsFacePose && poseStore != nil
             if isFollowing, !isFollowingFacePose {
                 // A new scan always starts from the camera's front view, even
@@ -96,6 +108,34 @@ struct LivePointCloudView: UIViewRepresentable {
                 view.accessibilityLabel = "实时点云，等待扫描数据"
             }
 
+            if let labSettings {
+                if labRenderer == nil {
+                    pointNode.geometry = nil
+                    displayedRevision = nil
+                    labRenderer = ScanLabRenderer(parent: pointNode, in: view)
+                }
+                // Completed surfaces have their own vertex/index correspondence.
+                // Keep both together; live snapshots may use a smaller sampled set.
+                let vertices = surfaceMesh?.vertices ?? snapshot?.vertices ?? []
+                let sourceRevision = (snapshot?.revision ?? 0)
+                    &+ (surfaceMesh?.vertexCount ?? 0) &* 31
+                    &+ (surfaceMesh?.frameCount ?? 0) &* 131
+                labRenderer?.update(vertices: vertices,
+                    triangleIndices: surfaceMesh?.triangleIndices ?? [], revision: sourceRevision,
+                    settings: labSettings, animatesAcquisition: animatesAcquisition,
+                    replayToken: replayToken, in: view)
+                return
+            }
+            if labRenderer != nil {
+                stopLab()
+                displayedRevision = nil
+                view.backgroundColor = ScanTheme.canvasUIColor
+                view.showsStatistics = false
+                cameraNode.camera?.usesOrthographicProjection = false
+                cameraNode.camera?.wantsHDR = false
+                cameraNode.camera?.bloomIntensity = 0
+            }
+
             // SwiftUI also updates for hints, counters, and camera frames. Only upload a new revision.
             guard snapshot?.revision != displayedRevision else { return }
             displayedRevision = snapshot?.revision
@@ -108,6 +148,11 @@ struct LivePointCloudView: UIViewRepresentable {
             }
             SCNTransaction.commit()
             view.setNeedsDisplay()
+        }
+
+        func stopLab() {
+            labRenderer?.stop()
+            labRenderer = nil
         }
 
         private func resetCamera(in view: SCNView) {

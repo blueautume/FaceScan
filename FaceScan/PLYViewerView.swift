@@ -8,6 +8,8 @@ import simd
 struct PLYViewerView: UIViewRepresentable {
     let id: UUID
     let mesh: ScanMesh
+    var labSettings: ScanLabSettings? = nil
+    var replayToken = 0
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -22,12 +24,18 @@ struct PLYViewerView: UIViewRepresentable {
         view.allowsCameraControl = true
         view.isAccessibilityElement = true
         context.coordinator.install(in: view)
-        context.coordinator.update(id: id, mesh: mesh, in: view)
+        context.coordinator.update(id: id, mesh: mesh, labSettings: labSettings,
+                                   replayToken: replayToken, in: view)
         return view
     }
 
     func updateUIView(_ uiView: SCNView, context: Context) {
-        context.coordinator.update(id: id, mesh: mesh, in: uiView)
+        context.coordinator.update(id: id, mesh: mesh, labSettings: labSettings,
+                                   replayToken: replayToken, in: uiView)
+    }
+
+    static func dismantleUIView(_ uiView: SCNView, coordinator: Coordinator) {
+        coordinator.stopLab()
     }
 
     @MainActor
@@ -35,6 +43,9 @@ struct PLYViewerView: UIViewRepresentable {
         private let pointNode = SCNNode()
         private let cameraNode = SCNNode()
         private var displayedID: UUID?
+        private var labRenderer: ScanLabRenderer?
+        private var labMesh: ScanMesh?
+        private var labRevision = 0
 
         func install(in view: SCNView) {
             view.allowsCameraControl = true
@@ -59,7 +70,41 @@ struct PLYViewerView: UIViewRepresentable {
             view.defaultCameraController.inertiaEnabled = true
         }
 
-        func update(id: UUID, mesh: ScanMesh, in view: SCNView) {
+        func update(id: UUID, mesh: ScanMesh, labSettings: ScanLabSettings? = nil,
+                    replayToken: Int = 0, in view: SCNView) {
+            if let labSettings {
+                if labRenderer == nil || displayedID != id {
+                    stopLab()
+                    pointNode.geometry = nil
+                    labMesh = PLYPointGeometryBuilder.makeLabMesh(mesh: mesh)
+                    labRevision += 1
+                    displayedID = id
+                    labRenderer = ScanLabRenderer(parent: pointNode, in: view)
+                    view.defaultCameraController.stopInertia()
+                    if let preview = view as? PLYPointCloudSceneView {
+                        preview.fitCameraNode = cameraNode
+                        preview.cloudRadius = max(labMesh?.vertices.map { simd_length($0.position) }.max() ?? 0.15, 0.02)
+                        preview.needsInitialFit = true
+                        preview.fitCameraIfNeeded()
+                    }
+                }
+                labRenderer?.update(vertices: labMesh?.vertices ?? [],
+                    triangleIndices: labMesh?.triangleIndices ?? [], revision: labRevision,
+                    settings: labSettings, animatesAcquisition: false,
+                    replayToken: replayToken, in: view)
+                view.accessibilityLabel = "PLY 效果实验，\(labMesh?.vertexCount ?? 0) 个点，可旋转和缩放"
+                return
+            }
+            if labRenderer != nil {
+                stopLab()
+                displayedID = nil
+                labMesh = nil
+                view.backgroundColor = ScanTheme.canvasUIColor
+                view.showsStatistics = false
+                cameraNode.camera?.usesOrthographicProjection = false
+                cameraNode.camera?.wantsHDR = false
+                cameraNode.camera?.bloomIntensity = 0
+            }
             // Hints, export state and other SwiftUI updates must preserve the
             // camera and reuse the imported file's existing GPU buffers.
             guard displayedID != id else { return }
@@ -79,6 +124,11 @@ struct PLYViewerView: UIViewRepresentable {
             }
             view.setNeedsDisplay()
         }
+
+        func stopLab() {
+            labRenderer?.stop()
+            labRenderer = nil
+        }
     }
 }
 
@@ -89,6 +139,39 @@ struct PLYPointCloudGeometry {
 }
 
 enum PLYPointGeometryBuilder {
+    /// The lab's physical controls use meters. Normalize only a preview copy,
+    /// retaining face/vertex correspondence even after invalid points are removed.
+    static func makeLabMesh(mesh: ScanMesh) -> ScanMesh? {
+        var low = SIMD3<Double>(repeating: .infinity)
+        var high = SIMD3<Double>(repeating: -.infinity)
+        for vertex in mesh.vertices where isRenderable(vertex) {
+            low = simd_min(low, SIMD3<Double>(vertex.position))
+            high = simd_max(high, SIMD3<Double>(vertex.position))
+        }
+        guard low.x.isFinite else { return nil }
+        let center = (low + high) * 0.5
+        let extent = high - low
+        let largest = max(extent.x, max(extent.y, extent.z))
+        let scale = largest > 0 ? 0.28 / largest : 1
+        var remap = [Int](repeating: -1, count: mesh.vertices.count)
+        var vertices: [ScanVertex] = []
+        vertices.reserveCapacity(mesh.vertices.count)
+        for (index, vertex) in mesh.vertices.enumerated() where isRenderable(vertex) {
+            remap[index] = vertices.count
+            vertices.append(ScanVertex(position: SIMD3<Float>((SIMD3<Double>(vertex.position) - center) * scale),
+                                       color: vertex.color))
+        }
+        var faces: [UInt32] = []
+        faces.reserveCapacity(mesh.triangleIndices.count)
+        for i in stride(from: 0, to: mesh.triangleIndices.count - mesh.triangleIndices.count % 3, by: 3) {
+            let triangle = mesh.triangleIndices[i..<(i + 3)].map(Int.init)
+            guard triangle.allSatisfy({ $0 < remap.count && remap[$0] >= 0 }) else { continue }
+            faces.append(contentsOf: triangle.map { UInt32(remap[$0]) })
+        }
+        return ScanMesh(vertices: vertices, triangleIndices: faces, frameCount: mesh.frameCount,
+                        coveredAngles: mesh.coveredAngles, isSample: mesh.isSample)
+    }
+
     /// Explicitly packed XYZ and RGB. Normalization applies only to this GPU
     /// buffer; a PLY may use any center or units, including very large values.
     static func make(vertices: [ScanVertex]) -> PLYPointCloudGeometry? {
