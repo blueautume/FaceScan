@@ -3,7 +3,8 @@ import SwiftUI
 import UIKit
 import simd
 
-/// A dedicated live renderer: measured RGB points only, without surface or normal rebuilding.
+/// A dedicated live/result renderer. Completed scans may supply a separate
+/// display-enhanced point copy, without changing the scan's measured data.
 /// Snapshots already use the face-local, meter-scale coordinate system (+Y up, +Z forward).
 struct LivePointCloudView: UIViewRepresentable {
     let snapshot: LivePointCloudSnapshot?
@@ -14,6 +15,8 @@ struct LivePointCloudView: UIViewRepresentable {
     var resultFramingIdentity: UUID? = nil
     var displayStyle: MeshDisplayStyle = .points
     var animatesAcquisition = false
+    var pointSizeScale: Double = 1
+    var isDisplayEnhanced = false
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -34,6 +37,7 @@ struct LivePointCloudView: UIViewRepresentable {
                                    followsFacePose: followsFacePose, surfaceMesh: surfaceMesh,
                                    resultFramingIdentity: resultFramingIdentity,
                                    displayStyle: displayStyle, animatesAcquisition: animatesAcquisition,
+                                   pointSizeScale: pointSizeScale, isDisplayEnhanced: isDisplayEnhanced,
                                    in: view)
         return view
     }
@@ -43,6 +47,7 @@ struct LivePointCloudView: UIViewRepresentable {
                                    followsFacePose: followsFacePose, surfaceMesh: surfaceMesh,
                                    resultFramingIdentity: resultFramingIdentity,
                                    displayStyle: displayStyle, animatesAcquisition: animatesAcquisition,
+                                   pointSizeScale: pointSizeScale, isDisplayEnhanced: isDisplayEnhanced,
                                    in: uiView)
     }
 
@@ -113,9 +118,11 @@ struct LivePointCloudView: UIViewRepresentable {
                     followsFacePose: Bool = false, surfaceMesh: ScanMesh? = nil,
                     resultFramingIdentity: UUID? = nil,
                     displayStyle: MeshDisplayStyle = .points,
-                    animatesAcquisition: Bool = false, in view: SCNView) {
+                    animatesAcquisition: Bool = false,
+                    pointSizeScale: Double = 1, isDisplayEnhanced: Bool = false, in view: SCNView) {
             let isFollowing = followsFacePose && poseStore != nil
             selectedStyle = displayStyle
+            if resources.updatePointSizeScale(pointSizeScale) { view.setNeedsDisplay() }
             if isFollowing, !isFollowingFacePose {
                 // A new scan always starts from the camera's front view, even
                 // if the previous finished scan was manually orbited.
@@ -130,7 +137,8 @@ struct LivePointCloudView: UIViewRepresentable {
             view.allowsCameraControl = !isFollowing
             if let surfaceMesh {
                 let source = surfaceMesh.isSample ? "合成示例" : "扫描结果"
-                let processing = surfaceMesh.isFiltered ? "滤波后点云" : "原始点云"
+                let version = surfaceMesh.isFiltered ? "滤波后点云" : "原始点云"
+                let processing = isDisplayEnhanced ? "\(version)，显示增强" : version
                 view.accessibilityLabel = "\(source)，\(processing)，\(surfaceMesh.vertexCount) 个点，可旋转和缩放"
             } else if let snapshot {
                 let source = snapshot.isSample ? "合成示例实时点云" : "实时扫描点云"
@@ -254,7 +262,7 @@ struct LivePointCloudView: UIViewRepresentable {
 
 enum LivePointGeometryBuilder {
     /// Interleaved, explicitly packed Float32 RGB and XYZ; never assume SIMD3's padded stride.
-    static func makeGeometry(vertices: [ScanVertex]) -> SCNGeometry? {
+    static func makeGeometry(vertices: [ScanVertex], pointSizeScale: Double = 1) -> SCNGeometry? {
         var values: [Float] = []
         values.reserveCapacity(vertices.count * 6)
         for vertex in vertices {
@@ -284,9 +292,10 @@ enum LivePointGeometryBuilder {
             dataOffset: 3 * MemoryLayout<Float>.size, dataStride: stride
         )
         let points = SCNGeometryElement(indices: (0..<count).map(UInt32.init), primitiveType: .point)
-        points.pointSize = 0.0014
-        points.minimumPointScreenSpaceRadius = 1.4
-        points.maximumPointScreenSpaceRadius = 2
+        let scale = PointCloudRenderResources.normalizedPointSizeScale(pointSizeScale)
+        points.pointSize = 0.0014 * scale
+        points.minimumPointScreenSpaceRadius = 1.4 * scale
+        points.maximumPointScreenSpaceRadius = 2 * scale
         let geometry = SCNGeometry(sources: [positions, colors], elements: [points])
         let material = SCNMaterial()
         material.lightingModel = .constant

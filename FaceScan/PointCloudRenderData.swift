@@ -220,11 +220,33 @@ final class PointCloudRenderResources {
     private let flightMaterial: SCNMaterial
     private var cachedPointCount = -1
     private var cachedPointElement: SCNGeometryElement?
+    private(set) var pointSizeScale: Double = 1
 
     init() {
         material = Self.makeMaterial()
         flightMaterial = Self.makeMaterial()
         flightMaterial.shaderModifiers = [.geometry: PointCloudFlight.shader]
+    }
+
+    /// Point size is a presentation property. Updating the shared element keeps
+    /// packed vertex/color buffers and every existing geometry source intact.
+    @discardableResult
+    func updatePointSizeScale(_ value: Double) -> Bool {
+        let scale = Self.normalizedPointSizeScale(value)
+        guard scale != pointSizeScale else { return false }
+        pointSizeScale = scale
+        if let element = cachedPointElement { applyPointSize(to: element) }
+        return true
+    }
+
+    nonisolated static func normalizedPointSizeScale(_ value: Double) -> Double {
+        value.isFinite ? min(4, max(0.25, value)) : 1
+    }
+
+    private func applyPointSize(to element: SCNGeometryElement) {
+        element.pointSize = 0.0014 * pointSizeScale
+        element.minimumPointScreenSpaceRadius = 1.4 * pointSizeScale
+        element.maximumPointScreenSpaceRadius = 2 * pointSizeScale
     }
 
     func make(data: PointCloudRenderData) -> (points: SCNGeometry?, surface: SCNGeometry?) {
@@ -247,9 +269,7 @@ final class PointCloudRenderResources {
         if cachedPointCount != data.pointCount {
             let element = SCNGeometryElement(data: data.pointIndexData, primitiveType: .point,
                                             primitiveCount: data.pointCount, bytesPerIndex: 4)
-            element.pointSize = 0.0014
-            element.minimumPointScreenSpaceRadius = 1.4
-            element.maximumPointScreenSpaceRadius = 2
+            applyPointSize(to: element)
             cachedPointElement = element
             cachedPointCount = data.pointCount
         }

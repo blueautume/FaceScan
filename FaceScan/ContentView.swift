@@ -5,6 +5,7 @@ struct ContentView: View {
     @StateObject private var privacy: PrivacyConsentStore
     @StateObject private var scanner: FaceScanController
     @StateObject private var scanFilter = ScanFilterController()
+    @StateObject private var scanEnhancement = ScanEnhancementController()
     @Environment(\.scenePhase) private var scenePhase
     @State private var showsPrivacy = false
     @State private var exporting = false
@@ -31,6 +32,12 @@ struct ContentView: View {
     @State private var resultStyle: MeshDisplayStyle = .points
     @State private var filterSettings = ScanFilterSettings.load()
     @State private var showsFilterSettings = false
+    @State private var enhancementSettings = ScanEnhancementSettings.load()
+    @State private var appliedEnhancementSettings: ScanEnhancementSettings?
+    @State private var displayPreferences = ScanDisplayPreferences.load()
+    @State private var showsPresentationSettings = false
+    @State private var isEnhancementEnabled = false
+    @State private var showsFilterStatistics = false
 
     init() {
         let consent = PrivacyConsentStore()
@@ -41,6 +48,23 @@ struct ContentView: View {
     private var originalMesh: ScanMesh? { sampleMesh ?? scanner.result }
     private var mesh: ScanMesh? { originalMesh.map { scanFilter.displayedMesh(for: $0) } }
     private var filteredResult: ScanFilterResult? { originalMesh.flatMap { scanFilter.result(for: $0) } }
+    private var enhancedPresentation: ScanEnhancementController.Presentation? {
+        mesh.flatMap { scanEnhancement.result(for: $0) }
+    }
+    private var presentationMesh: ScanMesh? {
+        mesh.map { scanEnhancement.displayedMesh(for: $0, isEnabled: isEnhancementEnabled) }
+    }
+    private var showsEnhancedPoints: Bool { isEnhancementEnabled && enhancedPresentation != nil }
+    private var usesLivePointSize: Bool { isScanning || showsLiveSample }
+    private var activePointSizeScale: Double {
+        usesLivePointSize ? displayPreferences.livePointSizeScale : displayPreferences.resultPointSizeScale
+    }
+    private var pointSizeBinding: Binding<Double> {
+        Binding(get: { activePointSizeScale }, set: { scale in
+            if usesLivePointSize { displayPreferences.livePointSizeScale = scale }
+            else { displayPreferences.resultPointSizeScale = scale }
+        })
+    }
     private var filterPresetLabel: String {
         if filterSettings.smoothingCurve != nil { return "自定义 · 曲线" }
         return filterSettings == .gentle ? "轻度" : (filterSettings == .reference ? "参考参数" : "自定义")
@@ -57,8 +81,11 @@ struct ContentView: View {
     }
 
     var body: some View {
-        let pickerToken = pickerGeneration
-        VStack(spacing: 20) {
+        errorPresentation
+    }
+
+    private var layout: some View {
+        VStack(spacing: 12) {
             HStack {
                 Text(importedDocument?.filename ?? "FaceScan")
                     .font(.system(size: 21, weight: .semibold))
@@ -68,6 +95,7 @@ struct ContentView: View {
                 Button {
                     wantsToScan = false
                     scanFilter.cancel()
+                    scanEnhancement.cancel()
                     scanner.suspendCaptureForFileViewing()
                     pickerGeneration = UUID()
                     choosingFile = true
@@ -93,6 +121,13 @@ struct ContentView: View {
             stage
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .layoutPriority(1)
+
+            if showsPoints, importedDocument == nil, !openingFile {
+                ScanPointSizeControl(title: usesLivePointSize ? "扫描点大小" : "结果点大小",
+                                     scale: pointSizeBinding, compact: true)
+                    .disabled(!usesLivePointSize && resultStyle == .color
+                              && !(presentationMesh?.triangleIndices.isEmpty ?? true))
+            }
 
             controls
         }
@@ -123,6 +158,11 @@ struct ContentView: View {
                 .accessibilityAddTraits(.isModal)
             }
         }
+    }
+
+    private var lifecycle: some View {
+        let pickerToken = pickerGeneration
+        return layout
         .onAppear {
             ScanExporter.removeTemporaryExports()
             if privacy.isAccepted { prepareCapture() }
@@ -145,7 +185,18 @@ struct ContentView: View {
         }
         .onChange(of: scanFilter.showsFiltered) { _, _ in savedNotice = false }
         .onChange(of: scanFilter.result?.mesh.renderIdentity) { _, _ in savedNotice = false }
+        .onChange(of: scanFilter.isFiltering) { _, filtering in
+            if filtering { scanEnhancement.cancel() }
+            else { refreshEnhancementForSelectedSource() }
+        }
         .onChange(of: filterSettings) { _, settings in settings.save() }
+        .onChange(of: enhancementSettings) { _, settings in settings.save() }
+        .onChange(of: displayPreferences) { _, preferences in preferences.save() }
+        .onChange(of: mesh?.renderIdentity) { _, _ in refreshEnhancementForSelectedSource() }
+        .onChange(of: isEnhancementEnabled) { _, enabled in
+            if enabled { applyEnhancement() }
+            else { scanEnhancement.cancel() }
+        }
         .onOpenURL { url in openFile(url) }
         .fileImporter(isPresented: $choosingFile,
                       allowedContentTypes: [PLYFileType.type], allowsMultipleSelection: false) { result in
@@ -163,6 +214,10 @@ struct ContentView: View {
         .onChange(of: choosingFile) { _, presented in
             if !presented, !openingFile, importedDocument == nil { restoreCapture() }
         }
+    }
+
+    private var sheets: some View {
+        lifecycle
         .sheet(isPresented: Binding(
             get: { exportURL != nil }, set: { if !$0 { clearStagedExport() } }
         ), onDismiss: clearStagedExport) {
@@ -180,24 +235,37 @@ struct ContentView: View {
                 applyFilter()
             }
         }
-        .task(id: showsLiveSample) {
-            guard showsLiveSample else { return }
-            let points = SampleFaceMesh.make().vertices.sorted { abs($0.position.x) < abs($1.position.x) }
-            for revision in 1...40 {
-                guard !Task.isCancelled else { return }
-                let count = points.count * revision / 40
-                syntheticSnapshot = LivePointCloudSnapshot(
-                    revision: revision, vertices: Array(points.prefix(count)),
-                    confirmedPointCount: count, isSample: true)
-                try? await Task.sleep(for: .milliseconds(180))
+        .sheet(isPresented: $showsPresentationSettings) {
+            ScanPresentationSettingsView(settings: $enhancementSettings,
+                                         isEnabled: $isEnhancementEnabled,
+                                         pointSizeScale: $displayPreferences.resultPointSizeScale) {
+                showsPresentationSettings = false
+                applyEnhancement()
             }
         }
-        .alert(scanFilter.errorMessage == nil ? errorTitle : "无法滤波", isPresented: Binding(
-            get: { exportError != nil || scanFilter.errorMessage != nil },
-            set: { if !$0 { exportError = nil; scanFilter.errorMessage = nil } }
+    }
+
+    private var errorPresentation: some View {
+        sheets
+        .task(id: showsLiveSample) {
+            await animateLiveSample()
+        }
+        .alert(activeErrorTitle, isPresented: Binding(
+            get: { activeErrorMessage != nil },
+            set: { if !$0 { clearErrors() } }
         )) {
-            Button("好", role: .cancel) { exportError = nil; scanFilter.errorMessage = nil }
-        } message: { Text(scanFilter.errorMessage ?? exportError ?? "请重试。") }
+            Button("好", role: .cancel) { clearErrors() }
+        } message: { Text(activeErrorMessage ?? "请重试。") }
+    }
+
+    private var activeErrorTitle: String {
+        if scanEnhancement.errorMessage != nil { return "无法增强显示" }
+        if scanFilter.errorMessage != nil { return "无法滤波" }
+        return errorTitle
+    }
+
+    private var activeErrorMessage: String? {
+        scanEnhancement.errorMessage ?? scanFilter.errorMessage ?? exportError
     }
 
     private var stage: some View {
@@ -211,10 +279,12 @@ struct ContentView: View {
                     && !showsLiveSample && scanner.phase != .unavailable,
                 poseStore: scanner.livePose,
                 followsFacePose: scanner.phase == .scanning,
-                surfaceMesh: mesh,
+                surfaceMesh: presentationMesh,
                 resultFramingIdentity: originalMesh?.renderIdentity,
                 displayStyle: mesh == nil ? .points : resultStyle,
-                animatesAcquisition: scanner.phase == .scanning || showsLiveSample)
+                animatesAcquisition: scanner.phase == .scanning || showsLiveSample,
+                pointSizeScale: activePointSizeScale,
+                isDisplayEnhanced: showsEnhancedPoints)
                 .opacity(importedDocument == nil && !openingFile ? 1 : 0)
                 .allowsHitTesting(importedDocument == nil && !openingFile)
                 .accessibilityHidden(importedDocument != nil || openingFile)
@@ -290,8 +360,10 @@ struct ContentView: View {
             return importedDocument.mesh.isSample ? "合成示例 · PLY 点云" : "PLY 点云"
         }
         if sampleMesh != nil || showsLiveSample {
-            return mesh?.isFiltered == true ? "合成示例 · 滤波后 · 非真实扫描" : "合成示例 · 非真实扫描"
+            let source = mesh?.isFiltered == true ? "合成示例 · 滤波后 · 非真实扫描" : "合成示例 · 非真实扫描"
+            return source + (showsEnhancedPoints ? " · 显示增强" : "")
         }
+        if showsEnhancedPoints { return mesh?.isFiltered == true ? "滤波后 · 显示增强" : "原始扫描 · 显示增强" }
         if mesh?.isFiltered == true { return "滤波后 · 观感预览" }
         if filteredResult != nil { return "原始扫描" }
         if mesh != nil { return "扫描完成" }
@@ -333,12 +405,30 @@ struct ContentView: View {
                         Label("滤波参数", systemImage: "slider.horizontal.3")
                     }
                     .disabled(exporting || scanFilter.isFiltering)
+                    .accessibilityValue(filterPresetLabel)
                     Spacer()
-                    Text(filterPresetLabel)
-                        .foregroundStyle(ScanTheme.secondary)
+                    Button {
+                        showsPresentationSettings = true
+                    } label: {
+                        Label("呈现增强", systemImage: "sparkles")
+                    }
+                    .disabled(exporting || scanFilter.isFiltering)
+                    if isEnhancementEnabled || enhancedPresentation != nil {
+                        Toggle("显示增强点云", isOn: $isEnhancementEnabled)
+                            .labelsHidden()
+                            .fixedSize()
+                            .tint(ScanTheme.tint)
+                            .accessibilityLabel("显示增强点云")
+                    }
                 }
                 .font(.system(size: 13, weight: .medium))
                 .frame(minHeight: 28)
+
+                if let enhancedPresentation, isEnhancementEnabled {
+                    Text("显示 \(enhancedPresentation.mesh.vertexCount) 点 · 插值 +\(enhancedPresentation.statistics.addedPointCount)\(enhancedPresentation.statistics.reachedLimit ? " · 达上限" : "") · 仅查看")
+                        .font(.system(size: 11))
+                        .foregroundStyle(ScanTheme.secondary)
+                }
 
                 if let filteredResult {
                     Picker("结果对比", selection: $scanFilter.showsFiltered) {
@@ -347,13 +437,14 @@ struct ContentView: View {
                     }
                     .pickerStyle(.segmented)
                     .disabled(exporting)
-                    Text("\(filteredResult.statistics.inputCount) 点 → \(filteredResult.statistics.outputCount) 点 · \(filteredResult.statistics.elapsedSeconds, specifier: "%.1f") 秒")
+                    DisclosureGroup(isExpanded: $showsFilterStatistics) {
+                        Text("离群剔除 \(filteredResult.statistics.sorRejectedCount) · 位移剔除 \(filteredResult.statistics.modelRejectedCount)")
+                            .foregroundStyle(ScanTheme.secondary)
+                    } label: {
+                        Text("\(filteredResult.statistics.inputCount) → \(filteredResult.statistics.outputCount) 点 · \(filteredResult.statistics.elapsedSeconds, specifier: "%.1f") 秒")
+                    }
                         .font(.system(size: 12))
                         .monospacedDigit()
-                        .foregroundStyle(ScanTheme.secondary)
-                        .accessibilityLabel("原始 \(filteredResult.statistics.inputCount) 点，滤波后 \(filteredResult.statistics.outputCount) 点，耗时 \(filteredResult.statistics.elapsedSeconds, specifier: "%.1f") 秒")
-                    Text("离群剔除 \(filteredResult.statistics.sorRejectedCount) · 位移剔除 \(filteredResult.statistics.modelRejectedCount)")
-                        .font(.system(size: 12))
                         .foregroundStyle(ScanTheme.secondary)
                     if filteredResult.settings != filterSettings {
                         Text("参数已更改，重新滤波后生效")
@@ -372,6 +463,16 @@ struct ContentView: View {
                     .foregroundStyle(ScanTheme.secondary)
                 }
 
+                if scanEnhancement.isProcessing {
+                    HStack {
+                        ProgressView("正在补点…")
+                        Spacer()
+                        Button("取消") { scanEnhancement.cancel() }
+                    }
+                    .font(.system(size: 13))
+                    .foregroundStyle(ScanTheme.secondary)
+                }
+
                 HStack(spacing: 12) {
                     primaryButton(filteredResult == nil ? "滤波" : "重新滤波",
                                   symbol: "camera.filters", action: applyFilter)
@@ -380,7 +481,7 @@ struct ContentView: View {
                                   symbol: "square.and.arrow.up") {
                         export(mesh)
                     }
-                    .disabled(exporting || scanFilter.isFiltering)
+                    .disabled(exporting || scanFilter.isFiltering || scanEnhancement.isProcessing)
                 }
                 Button("重新扫描", action: restart)
                     .font(.system(size: 14, weight: .medium))
@@ -412,6 +513,22 @@ struct ContentView: View {
         .buttonStyle(ScanPrimaryButton())
     }
 
+    private func animateLiveSample() async {
+        guard showsLiveSample else { return }
+        let sample = SampleFaceMesh.make()
+        let points: [ScanVertex] = sample.vertices.sorted { (left: ScanVertex, right: ScanVertex) -> Bool in
+            Swift.abs(left.position.x) < Swift.abs(right.position.x)
+        }
+        for revision in 1...40 {
+            guard !Task.isCancelled else { return }
+            let count = points.count * revision / 40
+            syntheticSnapshot = LivePointCloudSnapshot(
+                revision: revision, vertices: Array(points.prefix(count)),
+                confirmedPointCount: count, isSample: true)
+            try? await Task.sleep(for: .milliseconds(180))
+        }
+    }
+
     private func prepareCapture() {
         guard privacy.isAccepted, importedDocument == nil, !openingFile else { return }
         #if DEBUG
@@ -435,6 +552,8 @@ struct ContentView: View {
     private func beginScan() {
         guard privacy.isAccepted else { showsPrivacy = true; return }
         showsFilterSettings = false
+        showsPresentationSettings = false
+        scanEnhancement.reset()
         scanFilter.reset()
         resultStyle = .points
         hasEnteredCapture = true
@@ -450,6 +569,8 @@ struct ContentView: View {
     }
 
     private func restart() {
+        showsPresentationSettings = false
+        scanEnhancement.reset()
         showsFilterSettings = false
         scanFilter.reset()
         resultStyle = .points
@@ -464,6 +585,10 @@ struct ContentView: View {
     }
 
     private func revokeConsent() {
+        showsPresentationSettings = false
+        isEnhancementEnabled = false
+        appliedEnhancementSettings = nil
+        scanEnhancement.reset()
         showsFilterSettings = false
         scanFilter.reset()
         resultStyle = .points
@@ -520,7 +645,29 @@ struct ContentView: View {
         guard privacy.isAccepted, !exporting, !openingFile, importedDocument == nil,
               let originalMesh else { return }
         savedNotice = false
+        scanEnhancement.cancel()
         scanFilter.start(originalMesh, settings: filterSettings)
+    }
+
+    private func applyEnhancement() {
+        guard privacy.isAccepted, !exporting, !openingFile, !choosingFile, importedDocument == nil,
+              !scanFilter.isFiltering, let mesh else { return }
+        resultStyle = .points
+        appliedEnhancementSettings = enhancementSettings
+        scanEnhancement.start(mesh, settings: enhancementSettings)
+    }
+
+    private func refreshEnhancementForSelectedSource() {
+        guard isEnhancementEnabled, privacy.isAccepted, !scanFilter.isFiltering,
+              !openingFile, !choosingFile, importedDocument == nil,
+              let mesh else { scanEnhancement.cancel(); return }
+        scanEnhancement.start(mesh, settings: appliedEnhancementSettings ?? enhancementSettings)
+    }
+
+    private func clearErrors() {
+        exportError = nil
+        scanFilter.errorMessage = nil
+        scanEnhancement.errorMessage = nil
     }
 
     private func clearStagedExport() {
@@ -537,6 +684,8 @@ struct ContentView: View {
     }
 
     private func openFile(_ url: URL) {
+        showsPresentationSettings = false
+        scanEnhancement.cancel()
         showsFilterSettings = false
         scanFilter.cancel()
         pickerGeneration = UUID()
@@ -585,6 +734,7 @@ struct ContentView: View {
         guard importedDocument == nil, !openingFile else { return }
         scanner.allowCaptureAfterFileViewing()
         if hasEnteredCapture, privacy.isAccepted { scanner.prepare() }
+        refreshEnhancementForSelectedSource()
     }
 
 }
