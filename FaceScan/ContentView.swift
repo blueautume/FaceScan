@@ -42,7 +42,8 @@ struct ContentView: View {
     private var mesh: ScanMesh? { originalMesh.map { scanFilter.displayedMesh(for: $0) } }
     private var filteredResult: ScanFilterResult? { originalMesh.flatMap { scanFilter.result(for: $0) } }
     private var filterPresetLabel: String {
-        filterSettings == .gentle ? "轻度" : (filterSettings == .reference ? "参考参数" : "自定义")
+        if filterSettings.smoothingCurve != nil { return "自定义 · 曲线" }
+        return filterSettings == .gentle ? "轻度" : (filterSettings == .reference ? "参考参数" : "自定义")
     }
     private var isScanning: Bool { scanner.phase == .scanning || scanner.phase == .processing }
     private var showsPoints: Bool { isScanning || mesh != nil || showsLiveSample }

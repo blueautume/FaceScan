@@ -21,6 +21,8 @@ struct ScanFilterSettings: Codable, Equatable, Sendable {
     var colorHalfWindow = 2
     var maximumRadialDisplacement = 0.015
     var filterColors = true
+    /// Nil keeps the original geometry pipeline and preserves existing presets.
+    var smoothingCurve: FaceCloudSmoothingCurve? = nil
 
     static let storageKey = "FaceScan.filter.settings.v1"
     static let reference = ScanFilterSettings()
@@ -63,6 +65,7 @@ struct ScanFilterSettings: Codable, Equatable, Sendable {
         value.colorHalfWindow = colorHalfWindow
         value.maximumRadialDisplacement = maximumRadialDisplacement
         value.filterColors = filterColors
+        value.smoothingCurve = smoothingCurve
         return value
     }
 
@@ -79,7 +82,8 @@ struct ScanFilterSettings: Codable, Equatable, Sendable {
               !medianWindow.isMultiple(of: 2),
               (1...(medianWindow * medianWindow)).contains(minimumMedianObservations),
               (0...32).contains(bilateralIterations), (0...15).contains(bilateralHalfWindow),
-              (0...15).contains(colorHalfWindow) else { return false }
+              (0...15).contains(colorHalfWindow),
+              smoothingCurve?.isValid ?? true else { return false }
         return true
     }
 

@@ -17,6 +17,7 @@
 //
 // 默认参数与 Python unified_faces.py 相同。算法不依赖 Python、Open3D、
 // ARKit、SceneKit、Metal 或任何第三方库；底部包含精确 3D KD-tree。
+// 可选 smoothingCurve 在原始局部起伏上评估几何强度；nil 保留原参考路径。
 
 import Foundation
 
@@ -51,6 +52,9 @@ public struct FaceCloudConfiguration: Sendable {
     public var maximumRadialDisplacement: Double = 0.015
     /// 默认 true 与之前的结果一致；false 时只改几何，保留每个来源点的原始 RGB。
     public var filterColors = true
+    /// nil uses the reference geometry unchanged. The curve affects geometry
+    /// displacement only; SOR and optional RGB filtering remain independent.
+    public var smoothingCurve: FaceCloudSmoothingCurve? = nil
     /// 防止单位或坐标错误导致二维栅格过大。不是滤波参数。
     public var maximumGridCells = 1_000_000
     nonisolated public init() {}
@@ -176,6 +180,15 @@ public enum FacePointCloudProcessor: Sendable {
             rGrid[c] = FPCGrid.median(&scratch)
         }
 
+        // Measure the original observations before any spatial smoothing. A
+        // fitted local tilt is removed so a sloping cheek is not a feature.
+        let variation: [Double]?
+        if let curve = p.smoothingCurve, curve.uniformStrength == nil {
+            variation = try FPCAdaptiveSmoothing.localVariation(
+                radii: rGrid, observed: observed, active: active, nu: nt, nv: nv,
+                du: du, dv: dy, radius: curve.neighborhoodRadius, checkCancellation: check)
+        } else { variation = nil }
+
         // Masked median: only actual observed bins contribute.
         var surface = rGrid
         let mh = p.medianWindow / 2
@@ -279,8 +292,27 @@ public enum FacePointCloudProcessor: Sendable {
                 r += surface[index] * w
                 if p.filterColors { col += colorGrid[index] * w }
             }
-            let b = SIMD3(p.cylinderCenterX + r * sin(theta[i]), a.y,
+            var b = SIMD3(p.cylinderCenterX + r * sin(theta[i]), a.y,
                           p.cylinderCenterZ + r * cos(theta[i]))
+            if let curve = p.smoothingCurve {
+                let strength: Double
+                if let uniform = curve.uniformStrength { strength = uniform }
+                else if let variation {
+                    var local = 0.0
+                    var supported = true
+                    for j in 0..<4 where sample.weights[j] > 0 {
+                        let value = variation[sample.indices[j]]
+                        if !value.isFinite { supported = false; break }
+                        local += value * sample.weights[j]
+                    }
+                    // Within-cell layers can be absent from the median grid;
+                    // protect a source that differs strongly from that median.
+                    let withinCell = abs(radius[i] - rGrid[binIDs[i]])
+                    strength = supported ? curve.strength(for: max(local, withinCell)) : 0
+                } else { strength = 0 }
+                if strength == 0 { b = a }
+                else if strength < 1 { b = a + (b - a) * strength }
+            }
             let dx = b.x - a.x, dz = b.z - a.z
             let movement = sqrt(dx * dx + dz * dz)
             if movement > p.maximumRadialDisplacement { continue }
@@ -332,9 +364,78 @@ public enum FacePointCloudProcessor: Sendable {
               p.medianWindow % 2 == 1, p.minimumMedianObservations >= 1,
               p.minimumMedianObservations <= p.medianWindow * p.medianWindow,
               (0...32).contains(p.bilateralIterations), (0...15).contains(p.bilateralHalfWindow),
-              (0...15).contains(p.colorHalfWindow), (1...2_000_000).contains(p.maximumGridCells) else {
+              (0...15).contains(p.colorHalfWindow), (1...2_000_000).contains(p.maximumGridCells),
+              p.smoothingCurve?.isValid ?? true else {
             throw FaceCloudProcessingError.invalidConfiguration("尺寸、sigma、邻点数或窗口范围不合法")
         }
+    }
+}
+
+/// The metric is radial RMS around a fitted affine patch, not semantic face
+/// recognition or mathematical curvature. Unknown/sparse patches are NaN and
+/// conservatively retain their original geometry under a nonuniform curve.
+enum FPCAdaptiveSmoothing {
+    nonisolated static func localVariation(
+        radii: [Double], observed: [Bool], active: [Int], nu: Int, nv: Int,
+        du: Double, dv: Double, radius: Double,
+        checkCancellation: () throws -> Void = {}
+    ) throws -> [Double] {
+        var result = [Double](repeating: .nan, count: radii.count)
+        guard du.isFinite, du > 0, dv.isFinite, dv > 0,
+              radius.isFinite, radius > 0 else { return result }
+
+        // Bounded sampling avoids an unbounded O(radius/gridSize)^2 kernel at
+        // very fine grid settings. The usual settings sample every nearby bin.
+        let desiredU = min(radius / du, Double(max(0, (nu - 1) / 2)))
+        let desiredV = min(radius / dv, Double(max(0, nv - 1)))
+        let stepU = max(1, Int(ceil(desiredU / 12)))
+        let stepV = max(1, Int(ceil(desiredV / 12)))
+        let halfU = min(12, Int(floor(desiredU / Double(stepU))))
+        let halfV = min(12, Int(floor(desiredV / Double(stepV))))
+        struct Tap { let u: Int; let v: Int; let x: Double; let y: Double }
+        var taps: [Tap] = []
+        for u in -halfU...halfU {
+            for v in -halfV...halfV {
+                let x = Double(u * stepU) * du / radius
+                let y = Double(v * stepV) * dv / radius
+                if x * x + y * y <= 1 + 1e-12 {
+                    taps.append(Tap(u: u * stepU, v: v * stepV, x: x, y: y))
+                }
+            }
+        }
+        for (ordinal, cell) in active.enumerated() {
+            if ordinal & 63 == 0 { try checkCancellation() }
+            let u = cell / nv, v = cell % nv
+            var count = 0.0
+            var sx = 0.0, sy = 0.0, sz = 0.0
+            var sxx = 0.0, syy = 0.0, sxy = 0.0
+            var sxz = 0.0, syz = 0.0, szz = 0.0
+            for tap in taps {
+                let vv = v + tap.v
+                if vv < 0 || vv >= nv { continue }
+                let q = FPCGrid.wrap(u + tap.u, nu) * nv + vv
+                if !observed[q] { continue }
+                let x = tap.x, y = tap.y, z = radii[q] - radii[cell]
+                count += 1
+                sx += x; sy += y; sz += z
+                sxx += x * x; syy += y * y; sxy += x * y
+                sxz += x * z; syz += y * z; szz += z * z
+            }
+            guard count >= 6 else { continue }
+            let xx = sxx - sx * sx / count, yy = syy - sy * sy / count
+            let xy = sxy - sx * sy / count
+            let xz = sxz - sx * sz / count, yz = syz - sy * sz / count
+            let zz = szz - sz * sz / count
+            let determinant = xx * yy - xy * xy
+            guard xx > 1e-12, yy > 1e-12,
+                  determinant > 1e-10 * xx * yy else { continue }
+            let slopeX = (xz * yy - yz * xy) / determinant
+            let slopeY = (yz * xx - xz * xy) / determinant
+            let residual = zz - slopeX * xz - slopeY * yz
+            result[cell] = sqrt(max(0, residual / count))
+        }
+        try checkCancellation()
+        return result
     }
 }
 

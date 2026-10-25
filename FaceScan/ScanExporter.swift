@@ -88,7 +88,8 @@ enum ScanExporter {
         if mesh.isFiltered {
             let settings = mesh.filterSettings ?? .reference
             let preset = settings == .reference ? "reference" : "custom"
-            let colors = settings.filterColors ? "geometry and RGB filtered" : "geometry filtered, source RGB retained (8-bit)"
+            let geometry = settings.smoothingCurve == nil ? "geometry" : "geometry with adaptive smoothing curve"
+            let colors = settings.filterColors ? "\(geometry) and RGB filtered" : "\(geometry) filtered, source RGB retained (8-bit)"
             processing = "FacePointCloudProcessor \(preset) - \(colors), display only"
             let encoder = JSONEncoder()
             encoder.outputFormatting = .sortedKeys

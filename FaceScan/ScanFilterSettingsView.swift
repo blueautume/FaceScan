@@ -6,6 +6,7 @@ struct ScanFilterSettingsView: View {
     @Binding var settings: ScanFilterSettings
     let onApply: () -> Void
     @Environment(\.dismiss) private var dismiss
+    @State private var lastCurve = FaceCloudSmoothingCurve.featurePreserving
 
     private var presetName: String {
         if settings == .gentle { return "轻度" }
@@ -27,6 +28,7 @@ struct ScanFilterSettingsView: View {
                     Text("轻度预设减少平滑并保留原始颜色。调整后点“应用并滤波”，每次都从原始扫描重新计算。")
                 }
 
+                curveSection
                 geometrySection
                 outlierSection
                 colorSection
@@ -70,6 +72,50 @@ struct ScanFilterSettingsView: View {
         .onChange(of: settings.medianWindow) { _, window in
             settings.minimumMedianObservations = min(settings.minimumMedianObservations, window * window)
         }
+        .onAppear {
+            if let curve = settings.smoothingCurve { lastCurve = curve }
+        }
+        .onChange(of: settings.smoothingCurve) { _, curve in
+            if let curve { lastCurve = curve }
+        }
+    }
+
+    private var curveSection: some View {
+        Section {
+            Toggle("按起伏控制平滑", isOn: curveEnabled)
+                .accessibilityIdentifier("filterSettings.smoothingCurveEnabled")
+            if settings.smoothingCurve != nil {
+                ScanSmoothingCurveEditor(curve: curveBinding)
+                    .listRowInsets(EdgeInsets(top: 14, leading: 12, bottom: 14, trailing: 12))
+                millimeterSlider("曲线起伏范围", value: curveBinding.maximumVariation,
+                                 range: 0.5...8, step: 0.25)
+                millimeterSlider("起伏评估半径", value: curveBinding.neighborhoodRadius,
+                                 range: 2...8, step: 0.5)
+            }
+        } header: {
+            Text("平滑强度曲线")
+        } footer: {
+            Text(settings.smoothingCurve == nil
+                 ? "开启后可让小起伏区域更平滑，大起伏区域减少平滑。"
+                 : "0% 保留原位置，100% 使用下方几何平滑结果。右端强度用于超出曲线范围的起伏。评估半径决定观察多大邻域；采样不足时保留原位置，可增大评估半径。SOR 删点与颜色去噪另行生效。起伏也可能来自噪声。")
+        }
+    }
+
+    private var curveEnabled: Binding<Bool> {
+        Binding(get: { settings.smoothingCurve != nil }, set: { enabled in
+            if enabled { settings.smoothingCurve = lastCurve }
+            else {
+                if let curve = settings.smoothingCurve { lastCurve = curve }
+                settings.smoothingCurve = nil
+            }
+        })
+    }
+
+    private var curveBinding: Binding<FaceCloudSmoothingCurve> {
+        Binding(get: { settings.smoothingCurve ?? lastCurve }, set: { curve in
+            lastCurve = curve
+            settings.smoothingCurve = curve
+        })
     }
 
     private var geometrySection: some View {

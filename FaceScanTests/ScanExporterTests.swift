@@ -81,6 +81,28 @@ final class ScanExporterTests: XCTestCase {
         XCTAssertEqual(try JSONDecoder().decode(ScanFilterSettings.self, from: parameters), applied)
     }
 
+    func testFilteredExportRecordsTheAppliedNonlinearCurve() throws {
+        var mesh = triangleFixture()
+        mesh.isFiltered = true
+        mesh.triangleIndices = []
+        var applied = ScanFilterSettings.gentle
+        var curve = FaceCloudSmoothingCurve.featurePreserving
+        curve.strengths = [1, 0.7, 0.25, 0, 0]
+        curve.maximumVariation = 0.003
+        applied.smoothingCurve = curve
+        mesh.filterSettings = applied
+        let url = try ScanExporter.export(mesh)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let text = try String(contentsOf: url, encoding: .utf8)
+        XCTAssertTrue(text.contains("geometry with adaptive smoothing curve"))
+        let prefix = "comment filter_parameters_json "
+        let comment = try XCTUnwrap(text.split(separator: "\n").first { $0.hasPrefix(prefix) })
+        let recorded = try JSONDecoder().decode(ScanFilterSettings.self,
+                                               from: Data(comment.dropFirst(prefix.count).utf8))
+        XCTAssertEqual(recorded.smoothingCurve, curve)
+        XCTAssertEqual(recorded, applied)
+    }
+
     func testEmptyMeshIsRejected() {
         let mesh = ScanMesh(vertices: [], triangleIndices: [], frameCount: 0, coveredAngles: [])
         XCTAssertThrowsError(try ScanExporter.export(mesh)) { error in

@@ -210,6 +210,36 @@ final class ScanFilterControllerTests: XCTestCase {
     }
 
     @MainActor
+    func testEditingOnlyTheCurveReprocessesTheOriginalWithACapturedConfiguration() async throws {
+        let source = sourceMesh()
+        let gate = FilterWorkerGate()
+        let controller = ScanFilterController { mesh, settings in try await gate.process(mesh, settings: settings) }
+        var settings = ScanFilterSettings.gentle
+        settings.smoothingCurve = .featurePreserving
+        controller.start(source, settings: settings)
+        await gate.waitForRequest(source.renderIdentity)
+        await gate.succeed(source.renderIdentity, with: filteredResult(from: source))
+        await controller.waitUntilFinished()
+
+        settings.smoothingCurve?.strengths[2] = 0.1
+        let requested = settings
+        controller.start(source, settings: settings)
+        settings.smoothingCurve?.strengths[2] = 0.9
+        await gate.waitForRequest(source.renderIdentity)
+        let configurations = await gate.receivedSettings
+        let meshes = await gate.receivedMeshes
+        XCTAssertEqual(configurations.count, 2)
+        XCTAssertEqual(configurations.last, requested)
+        XCTAssertTrue(meshes.allSatisfy { !$0.isFiltered && $0.renderIdentity == source.renderIdentity })
+        await gate.succeed(source.renderIdentity, with: filteredResult(from: source))
+        await controller.waitUntilFinished()
+        XCTAssertEqual(controller.result(for: source)?.settings, requested)
+        controller.start(source, settings: requested)
+        let count = await gate.requestCount
+        XCTAssertEqual(count, 2, "An unchanged curve should reuse the completed result.")
+    }
+
+    @MainActor
     private func completionOfCurrentWork(_ controller: ScanFilterController) async -> Task<Void, Never> {
         let entered = expectation(description: "Completion waiter captured the current task")
         let completion = Task { @MainActor in
