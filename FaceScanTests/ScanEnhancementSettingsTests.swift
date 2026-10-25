@@ -7,6 +7,7 @@ final class ScanEnhancementSettingsTests: XCTestCase {
         let settings = ScanEnhancementSettings()
         XCTAssertTrue(settings.isValid)
         XCTAssertEqual(settings.targetSpacing, 0.0008)
+        XCTAssertEqual(settings.resolutionMultiplier, 4)
         XCTAssertEqual(settings.supportRadius, 0.004)
         XCTAssertEqual(settings.maximumGap, 0.003)
         XCTAssertEqual(settings.edgeProtection, 0.7)
@@ -19,6 +20,7 @@ final class ScanEnhancementSettingsTests: XCTestCase {
         try withDefaults { defaults in
             var settings = ScanEnhancementSettings()
             settings.targetSpacing = 0.0012
+            settings.resolutionMultiplier = 8
             settings.supportRadius = 0.006
             settings.maximumGap = 0.0045
             settings.edgeProtection = 0.9
@@ -29,6 +31,7 @@ final class ScanEnhancementSettingsTests: XCTestCase {
             let restored = ScanEnhancementSettings.load(from: defaults)
             XCTAssertEqual(restored, settings)
             XCTAssertEqual(restored.maximumGap, 0.0045)
+            XCTAssertEqual(restored.resolutionMultiplier, 8)
             XCTAssertEqual(restored.seed, 123_456)
         }
     }
@@ -87,6 +90,64 @@ final class ScanEnhancementSettingsTests: XCTestCase {
             let restored = ScanDisplayPreferences.load(from: defaults)
             XCTAssertEqual(restored.livePointSizeScale, 1.8)
             XCTAssertEqual(restored.resultPointSizeScale, 3.2)
+        }
+    }
+
+    func testLegacyEnhancementParametersKeepSavedValuesAndGainFourTimesResolution() throws {
+        try withDefaults { defaults in
+            var expected = ScanEnhancementSettings()
+            expected.targetSpacing = 0.0013
+            expected.supportRadius = 0.006
+            expected.maximumGap = 0.004
+            expected.edgeProtection = 0.85
+            expected.colorTolerance = 40
+            expected.maximumPointCount = 300_000
+            expected.seed = 987_654
+            var encoded = expected
+            encoded.resolutionMultiplier = 16
+            var legacy = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(encoded)) as? [String: Any])
+            XCTAssertNotNil(legacy.removeValue(forKey: "resolutionMultiplier"))
+            let data = try JSONSerialization.data(withJSONObject: legacy)
+            defaults.set(data, forKey: ScanEnhancementSettings.storageKey)
+
+            XCTAssertEqual(try JSONDecoder().decode(ScanEnhancementSettings.self, from: data), expected)
+            XCTAssertEqual(ScanEnhancementSettings.load(from: defaults), expected)
+
+            legacy.removeValue(forKey: "supportRadius")
+            let incomplete = try JSONSerialization.data(withJSONObject: legacy)
+            XCTAssertThrowsError(try JSONDecoder().decode(ScanEnhancementSettings.self, from: incomplete),
+                                 "Only the newly introduced field may be absent.")
+            defaults.set(incomplete, forKey: ScanEnhancementSettings.storageKey)
+            XCTAssertEqual(ScanEnhancementSettings.load(from: defaults), ScanEnhancementSettings())
+        }
+    }
+
+    func testInvalidResolutionCannotOverwriteSavedSettingsAndStoredInvalidValuesFallBack() throws {
+        try withDefaults { defaults in
+            var saved = ScanEnhancementSettings()
+            saved.resolutionMultiplier = 8
+            saved.save(to: defaults)
+            for value in [0.99, 16.01, Double.nan, Double.infinity] {
+                var invalid = saved
+                invalid.resolutionMultiplier = value
+                XCTAssertFalse(invalid.isValid)
+                invalid.save(to: defaults)
+                XCTAssertEqual(ScanEnhancementSettings.load(from: defaults), saved)
+            }
+            for value in [1.0, 16] {
+                var valid = saved
+                valid.resolutionMultiplier = value
+                XCTAssertTrue(valid.isValid)
+            }
+            var invalid = saved
+            invalid.resolutionMultiplier = 20
+            defaults.set(try JSONEncoder().encode(invalid), forKey: ScanEnhancementSettings.storageKey)
+            XCTAssertEqual(ScanEnhancementSettings.load(from: defaults), ScanEnhancementSettings())
+
+            var nullValue = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(saved)) as? [String: Any])
+            nullValue["resolutionMultiplier"] = NSNull()
+            XCTAssertThrowsError(try JSONDecoder().decode(ScanEnhancementSettings.self,
+                                                         from: JSONSerialization.data(withJSONObject: nullValue)))
         }
     }
 

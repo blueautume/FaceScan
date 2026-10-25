@@ -56,12 +56,9 @@ enum PointCloudDisplayEnhancer {
         output.reserveCapacity(min(settings.maximumPointCount, vertices.count * 4))
         var cache = [EnhancementPatch?](repeating: nil, count: vertices.count)
         var examined = [Bool](repeating: false, count: vertices.count)
-        let spacing = Double(settings.targetSpacing)
-        let spacingSquared = settings.targetSpacing * settings.targetSpacing
+        var typicalSpacings = [Float](repeating: 0, count: vertices.count)
         let colorLimitSquared = pow(Double(settings.colorTolerance) / 255, 2)
         let protection = Double(settings.edgeProtection)
-        let rmsLimit = spacing * (0.95 - 0.8 * protection)
-        let planeLimit = spacing * (1.5 - 1.25 * protection)
         let normalCosine = cos((60 - 45 * protection) * .pi / 180)
         let maxEdgeSquared = Double(settings.maximumGap * settings.maximumGap)
         var random = EnhancementRandom(seed: settings.seed)
@@ -70,11 +67,31 @@ enum PointCloudDisplayEnhancer {
         // from turning a requested small display enhancement into an unbounded job.
         let maximumAttempts = min(8_000_000, max(20_000, (settings.maximumPointCount - vertices.count) * 40))
 
-        func patch(at index: Int) -> EnhancementPatch? {
+        func typicalSpacing(at index: Int, neighbors: [EnhancementNeighbor]) -> Float? {
+            if typicalSpacings[index] > 0 { return typicalSpacings[index] }
+            // Duplicates do not describe surface resolution. Extremely dense
+            // coincident clusters with no independent support are left alone.
+            let distances = Array(neighbors.lazy.filter { $0.distanceSquared > 1e-16 }
+                .prefix(6).map { sqrt($0.distanceSquared) })
+            guard distances.count >= 3 else { return nil }
+            let middle = distances.count / 2
+            let spacing = distances.count.isMultiple(of: 2)
+                ? (distances[middle - 1] + distances[middle]) * 0.5 : distances[middle]
+            typicalSpacings[index] = spacing
+            return spacing
+        }
+
+        func patch(at index: Int, suppliedNeighbors: [EnhancementNeighbor]? = nil) -> EnhancementPatch? {
             if examined[index] { return cache[index] }
             examined[index] = true
-            let neighbors = sourceIndex.nearest(to: index, count: 24, colorLimitSquared: colorLimitSquared)
-            guard neighbors.count >= 5 else { return nil }
+            let neighbors = suppliedNeighbors
+                ?? sourceIndex.nearest(to: index, count: 24, colorLimitSquared: colorLimitSquared)
+            guard neighbors.count >= 5, let typical = typicalSpacing(at: index, neighbors: neighbors) else { return nil }
+            // Geometry confidence depends on measured source scale, not the
+            // requested upsampling multiplier. More resolution must not itself
+            // make every slightly curved/noisy patch fail the plane fit.
+            let geometryScale = Double(min(settings.targetSpacing, typical))
+            let rmsLimit = geometryScale * (0.95 - 0.8 * protection)
             let pointIDs = [index] + neighbors.map(\.index)
             guard let fit = EnhancementPatch.fit(pointIDs.map { vertices[$0].position }),
                   fit.rms <= rmsLimit else { return nil }
@@ -82,16 +99,36 @@ enum PointCloudDisplayEnhancer {
             return fit
         }
 
-        anchorLoop: for anchor in vertices.indices {
+        struct TriangleWork {
+            let first: UInt32
+            let second: UInt32
+            let sampleCount: UInt8
+        }
+        struct AnchorWork {
+            let source: Int
+            let triangles: Range<Int>
+            let spacing: Float
+            let planeLimit: Double
+        }
+        var triangles: [TriangleWork] = []
+        var anchors: [AnchorWork] = []
+        anchors.reserveCapacity(vertices.count)
+        let resolutionScale = Float(sqrt(settings.resolutionMultiplier))
+
+        // First find supported patches everywhere. Sampling happens in spatially
+        // dispersed rounds afterwards, so a budget cannot be exhausted by the
+        // first rows of a scan before the opposite side of the face is visited.
+        for anchor in vertices.indices {
             if anchor.isMultiple(of: 32) { try Task.checkCancellation() }
-            if output.count >= settings.maximumPointCount || attempts >= maximumAttempts { break }
             let candidates = sourceIndex.nearest(to: anchor, count: 24, colorLimitSquared: colorLimitSquared)
-            guard candidates.count >= 5 else { continue }
-            // Dense source regions need no extra points. The occupancy check
-            // below remains exact and includes every original source point.
-            let near = candidates.prefix(6).map(\.distanceSquared).sorted()
-            if near[near.count / 2] < spacingSquared * 0.8 { continue }
-            guard let base = patch(at: anchor) else { continue }
+            guard candidates.count >= 5,
+                  let typical = typicalSpacing(at: anchor, neighbors: candidates),
+                  let base = patch(at: anchor, suppliedNeighbors: candidates) else { continue }
+            let effectiveSpacing = min(settings.targetSpacing, typical / resolutionScale)
+            guard effectiveSpacing.isFinite, effectiveSpacing > 0 else { continue }
+            let spacing = Double(effectiveSpacing)
+            let geometryScale = Double(min(settings.targetSpacing, typical))
+            let planeLimit = geometryScale * (1.5 - 1.25 * protection)
             let origin = SIMD3<Double>(vertices[anchor].position)
 
             struct Ray { let index: Int; let angle: Double; let lengthSquared: Double }
@@ -112,6 +149,7 @@ enum PointCloudDisplayEnhancer {
             }
             let ring = rays.values.sorted { $0.angle == $1.angle ? $0.index < $1.index : $0.angle < $1.angle }
             guard ring.count >= 2 else { continue }
+            let firstTriangle = triangles.count
             for ray in ring.indices {
                 let first = ring[ray], second = ring[(ray + 1) % ring.count]
                 var angle = second.angle - first.angle
@@ -124,20 +162,41 @@ enum PointCloudDisplayEnhancer {
                       simd_length_squared(SIMD3<Double>(b.color) - SIMD3<Double>(c.color)) <= colorLimitSquared else { continue }
                 let area = simd_length(simd_cross(pb - pa, pc - pa)) * 0.5
                 guard area >= spacing * spacing * 0.25 else { continue }
-                let sampleCount = min(24, max(3, Int(ceil(area / (spacing * spacing) * 5))))
-                for _ in 0..<sampleCount {
+                let sampleCount = Int(min(48, max(3, ceil(area / (spacing * spacing) * 5))))
+                triangles.append(TriangleWork(first: UInt32(first.index), second: UInt32(second.index),
+                                              sampleCount: UInt8(sampleCount)))
+            }
+            if triangles.count > firstTriangle {
+                anchors.append(AnchorWork(source: anchor, triangles: firstTriangle..<triangles.count,
+                                          spacing: effectiveSpacing, planeLimit: planeLimit))
+            }
+        }
+        let order = EnhancementSpatialOrder.make(anchors.map { vertices[$0.source].position })
+        let rounds = Int(triangles.map(\.sampleCount).max() ?? 0)
+        samplingLoop: for round in 0..<rounds {
+            try Task.checkCancellation()
+            for (ordinal, workIndex) in order.enumerated() {
+                if ordinal.isMultiple(of: 32) { try Task.checkCancellation() }
+                let work = anchors[workIndex]
+                guard let base = cache[work.source] else { continue }
+                let a = vertices[work.source], pa = SIMD3<Double>(a.position)
+                for triangleIndex in work.triangles {
+                    let triangle = triangles[triangleIndex]
+                    guard round < triangle.sampleCount else { continue }
                     attempts += 1
                     if attempts.isMultiple(of: 128) { try Task.checkCancellation() }
-                    if output.count >= settings.maximumPointCount || attempts >= maximumAttempts { break anchorLoop }
+                    if output.count >= settings.maximumPointCount || attempts >= maximumAttempts { break samplingLoop }
+                    let b = vertices[Int(triangle.first)], c = vertices[Int(triangle.second)]
+                    let pb = SIMD3<Double>(b.position), pc = SIMD3<Double>(c.position)
                     let root = sqrt(random.unit())
                     let u = 1 - root, v = root * (1 - random.unit()), w = 1 - u - v
                     let candidate = pa * u + pb * v + pc * w
                     let offset = simd_dot(base.center - candidate, base.normal)
-                    guard abs(offset) <= planeLimit else { continue }
+                    guard abs(offset) <= work.planeLimit else { continue }
                     let projected = candidate + base.normal * offset
                     let position = SIMD3<Float>(projected)
                     guard abs(position.x) <= 2, abs(position.y) <= 2, abs(position.z) <= 2,
-                          !occupancy.hasPoint(closerThan: settings.targetSpacing, to: position) else { continue }
+                          !occupancy.hasPoint(closerThan: work.spacing, to: position) else { continue }
                     // Position comes from this supported patch, and its color
                     // uses exactly the same compatible source triangle.
                     let color = a.color * Float(u) + b.color * Float(v) + c.color * Float(w)
@@ -181,6 +240,41 @@ private struct EnhancementCell: Hashable {
 private struct EnhancementNeighbor {
     let index: Int
     let distanceSquared: Float
+}
+
+/// Morton order groups nearby surface patches; visiting the bit-reversed ranks
+/// spreads early attempts across the complete supported surface. Unlike input
+/// order or a single local fan, every sampling round starts globally dispersed.
+private enum EnhancementSpatialOrder {
+    static func make(_ positions: [SIMD3<Float>]) -> [Int] {
+        guard !positions.isEmpty else { return [] }
+        var low = SIMD3<Float>(repeating: .infinity), high = SIMD3<Float>(repeating: -.infinity)
+        for point in positions { low = simd_min(low, point); high = simd_max(high, point) }
+        let span = high - low
+        func code(_ point: SIMD3<Float>) -> UInt32 {
+            var code: UInt32 = 0
+            for axis in 0..<3 {
+                let fraction: Float = span[axis] > 1e-8 ? (point[axis] - low[axis]) / span[axis] : 0
+                let quantized = UInt32(min(1, max(0, fraction)) * 1_023)
+                for bit in 0..<10 { code |= ((quantized >> bit) & 1) << (bit * 3 + axis) }
+            }
+            return code
+        }
+        let codes = positions.map(code)
+        let sorted = positions.indices.sorted {
+            codes[$0] == codes[$1] ? $0 < $1 : codes[$0] < codes[$1]
+        }
+        var power = 1, bits = 0
+        while power < sorted.count { power <<= 1; bits += 1 }
+        var result: [Int] = []
+        result.reserveCapacity(sorted.count)
+        for rank in 0..<power {
+            var value = rank, reversed = 0
+            for _ in 0..<bits { reversed = (reversed << 1) | (value & 1); value >>= 1 }
+            if reversed < sorted.count { result.append(sorted[reversed]) }
+        }
+        return result
+    }
 }
 
 private struct EnhancementSourceIndex {

@@ -64,16 +64,26 @@ struct ScanPresentationSettingsView: View {
 
     private var densitySection: some View {
         Section {
+            Picker("表面采样倍率", selection: $settings.resolutionMultiplier) {
+                ForEach([1.0, 2, 4, 8, 16], id: \.self) { value in
+                    Text("\(value, specifier: "%.0f")×").tag(value)
+                }
+                if ![1.0, 2, 4, 8, 16].contains(settings.resolutionMultiplier) {
+                    Text("\(settings.resolutionMultiplier, specifier: "%.2f")×")
+                        .tag(settings.resolutionMultiplier)
+                }
+            }
+            .accessibilityIdentifier("presentation.resolutionMultiplier")
             millimeterSlider("目标点间距", value: $settings.targetSpacing,
-                             range: 0.4...2, step: 0.1)
+                             range: 0.2...2, step: 0.1)
             millimeterSlider("局部拟合半径", value: $settings.supportRadius,
                              range: 2...8, step: 0.5)
             millimeterSlider("允许补点跨度", value: $settings.maximumGap,
                              range: 1...6, step: 0.25)
         } header: {
-            Text("表面补点")
+            Text("表面加密")
         } footer: {
-            Text("目标间距越小，新增点越密、计算越多。只在已有点支持的局部表面内插值；允许跨度用于限制跨空隙连接，大缺口保持空缺。")
+            Text("倍率表示近似单位面积点数倍率，4×约使原始点距减半，密集区域也会细分。目标点间距是全表面的最大目标间距，与倍率细分后的局部点距取更细者；实际加密受点数上限和边界保护约束。允许跨度限制跨空隙连接，大缺口保持空缺。")
         }
     }
 
@@ -100,13 +110,14 @@ struct ScanPresentationSettingsView: View {
                 Text("10 万").tag(100_000)
                 Text("20 万").tag(200_000)
                 Text("30 万").tag(300_000)
-                if ![100_000, 200_000, 300_000].contains(settings.maximumPointCount) {
+                Text("40 万").tag(400_000)
+                if ![100_000, 200_000, 300_000, 400_000].contains(settings.maximumPointCount) {
                     Text("\(settings.maximumPointCount) 点").tag(settings.maximumPointCount)
                 }
             }
             .accessibilityIdentifier("presentation.maximumPointCount")
         } footer: {
-            Text("上限限制新增点，已有来源点始终保留。增强仅用于显示，不改写原始或滤波坐标；常规 PLY 导出仍保存所选扫描数据。补点能改善连续感，不能恢复未采到的细节。")
+            Text("达到上限会停止新增，已有来源点始终保留。倍率是采样目标，不保证输出点数恰好成倍。增强仅用于显示，不改写原始或滤波坐标；常规 PLY 导出仍保存所选扫描数据。加密能改善连续感，不能恢复未采到的细节。")
         }
     }
 

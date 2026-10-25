@@ -4,6 +4,8 @@ import Foundation
 /// Lengths are meters; the settings sheet displays millimeters.
 struct ScanEnhancementSettings: Codable, Equatable, Sendable {
     var targetSpacing: Float = 0.0008
+    /// Approximate points-per-surface-area multiplier; 4x halves local spacing.
+    var resolutionMultiplier: Double = 4
     var supportRadius: Float = 0.004
     var maximumGap: Float = 0.003
     var edgeProtection: Float = 0.7
@@ -15,6 +17,7 @@ struct ScanEnhancementSettings: Codable, Equatable, Sendable {
 
     var isValid: Bool {
         targetSpacing.isFinite && (0.0002...0.005).contains(targetSpacing)
+            && resolutionMultiplier.isFinite && (1...16).contains(resolutionMultiplier)
             && supportRadius.isFinite && (0.001...0.02).contains(supportRadius)
             && maximumGap.isFinite && (0.0005...0.012).contains(maximumGap)
             && edgeProtection.isFinite && (0...1).contains(edgeProtection)
@@ -32,6 +35,29 @@ struct ScanEnhancementSettings: Codable, Equatable, Sendable {
     func save(to defaults: UserDefaults = .standard) {
         guard isValid, let data = try? JSONEncoder().encode(self) else { return }
         defaults.set(data, forKey: Self.storageKey)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case targetSpacing, resolutionMultiplier, supportRadius, maximumGap
+        case edgeProtection, colorTolerance, maximumPointCount, seed
+    }
+}
+
+extension ScanEnhancementSettings {
+    /// Existing settings predate the area multiplier. Preserve every saved
+    /// value while adding the full-surface default; malformed old fields fail.
+    init(from decoder: Decoder) throws {
+        self.init()
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        targetSpacing = try container.decode(Float.self, forKey: .targetSpacing)
+        resolutionMultiplier = container.contains(.resolutionMultiplier)
+            ? try container.decode(Double.self, forKey: .resolutionMultiplier) : 4
+        supportRadius = try container.decode(Float.self, forKey: .supportRadius)
+        maximumGap = try container.decode(Float.self, forKey: .maximumGap)
+        edgeProtection = try container.decode(Float.self, forKey: .edgeProtection)
+        colorTolerance = try container.decode(Float.self, forKey: .colorTolerance)
+        maximumPointCount = try container.decode(Int.self, forKey: .maximumPointCount)
+        seed = try container.decode(UInt64.self, forKey: .seed)
     }
 }
 

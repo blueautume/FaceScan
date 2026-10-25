@@ -34,6 +34,7 @@ final class PointCloudDisplayEnhancerTests: XCTestCase {
     func testFixedSeedIsStableAndSpacingControlsDensity() throws {
         let source = flatPatch()
         var settings = ScanEnhancementSettings()
+        settings.resolutionMultiplier = 1
         settings.maximumPointCount = 1_000
         let first = try PointCloudDisplayEnhancer.process(source, settings: settings)
         let repeated = try PointCloudDisplayEnhancer.process(source, settings: settings)
@@ -47,6 +48,104 @@ final class PointCloudDisplayEnhancerTests: XCTestCase {
         let otherSeed = try PointCloudDisplayEnhancer.process(source, settings: settings)
         XCTAssertNotEqual(otherSeed.vertices.dropFirst(source.count).map(\.position),
                           first.vertices.dropFirst(source.count).map(\.position))
+    }
+
+    func testDenseSurfaceIsUpsampledEvenWhenAlreadyBelowTargetSpacing() throws {
+        let source = patch(spacing: 0.0005)
+        var settings = ScanEnhancementSettings()
+        settings.targetSpacing = 0.0008
+        settings.resolutionMultiplier = 4
+        settings.maximumPointCount = 2_000
+        let result = try PointCloudDisplayEnhancer.process(source, settings: settings)
+
+        XCTAssertGreaterThan(result.addedPointCount, source.count / 2,
+                             "Full-surface supersampling must also refine an already dense source patch.")
+        XCTAssertEqual(Array(result.vertices.prefix(source.count)).map(\.position), source.map(\.position))
+        XCTAssertEqual(Array(result.vertices.prefix(source.count)).map(\.color), source.map(\.color))
+        for vertex in result.vertices.dropFirst(source.count) {
+            XCTAssertEqual(vertex.position.z, 0.04, accuracy: 1e-7)
+            XCTAssertLessThanOrEqual(abs(vertex.position.x), 0.0025 + 1e-7)
+            XCTAssertLessThanOrEqual(abs(vertex.position.y), 0.0025 + 1e-7)
+        }
+        let nearestNewDistance = result.vertices.dropFirst(source.count).map { vertex in
+            source.map { simd_distance(vertex.position, $0.position) }.min() ?? .infinity
+        }.min() ?? .infinity
+        XCTAssertLessThan(nearestNewDistance, settings.targetSpacing,
+                          "The absolute target spacing must not veto the finer resolution requested for a dense patch.")
+        XCTAssertGreaterThan(nearestNewDistance, 0.0001, "Refinement must add distinct surface samples, not duplicates.")
+    }
+
+    func testResolutionMultiplierRefinesBothDenseAndSparseSurfaceRegions() throws {
+        let source = patch(spacing: 0.0005, center: SIMD3(-0.02, 0, 0.04))
+            + patch(spacing: 0.001, center: SIMD3(0.02, 0, 0.04))
+        var settings = ScanEnhancementSettings()
+        settings.maximumPointCount = 5_000
+        settings.resolutionMultiplier = 1
+        let baseline = try PointCloudDisplayEnhancer.process(source, settings: settings)
+        settings.resolutionMultiplier = 4
+        let refined = try PointCloudDisplayEnhancer.process(source, settings: settings)
+
+        for isLeft in [true, false] {
+            let originalSideCount = source.filter { ($0.position.x < 0) == isLeft }.count
+            let coarseCount = baseline.vertices.dropFirst(source.count).filter { ($0.position.x < 0) == isLeft }.count
+            let fineCount = refined.vertices.dropFirst(source.count).filter { ($0.position.x < 0) == isLeft }.count
+            XCTAssertGreaterThan(fineCount, coarseCount + originalSideCount / 4,
+                                 "Increasing surface resolution must refine each source density, including the dense region.")
+        }
+        XCTAssertTrue(refined.vertices.dropFirst(source.count).allSatisfy { abs($0.position.x) >= 0.015 - 1e-7 },
+                      "Whole-surface refinement still needs observed support and must not join disconnected regions.")
+    }
+
+    func testHigherResolutionStillRefinesASlightlyUndulatingDenseSurface() throws {
+        let source = patch(spacing: 0.0005).map { vertex in
+            var point = vertex
+            // Smooth 0.03 mm relief represents a dense supported surface that
+            // is not perfectly planar. A finer sampling request must not make
+            // its geometry protection progressively reject the whole patch.
+            point.position.z += 0.00003 * sin(vertex.position.x / 0.0015)
+                * cos(vertex.position.y / 0.0018)
+            return point
+        }
+        var settings = ScanEnhancementSettings()
+        settings.maximumPointCount = 5_000
+        var counts: [Int] = []
+        for multiplier: Double in [1, 4, 8] {
+            settings.resolutionMultiplier = multiplier
+            let result = try PointCloudDisplayEnhancer.process(source, settings: settings)
+            counts.append(result.addedPointCount)
+            XCTAssertEqual(Array(result.vertices.prefix(source.count)).map(\.position), source.map(\.position))
+            XCTAssertEqual(Array(result.vertices.prefix(source.count)).map(\.color), source.map(\.color))
+            XCTAssertTrue(result.vertices.dropFirst(source.count).allSatisfy {
+                abs($0.position.z - 0.04) <= 0.00004
+            }, "Generated samples should remain close to the supported shallow relief.")
+        }
+        XCTAssertGreaterThan(counts[1], 0, "Four-times sampling should refine supported nonplanar dense regions.")
+        XCTAssertGreaterThan(counts[1], counts[0])
+        XCTAssertGreaterThan(counts[2], counts[1],
+                             "Increasing to eight-times sampling must not disable refinement through stricter geometry thresholds.")
+    }
+
+    func testLimitedBudgetCoversTheWholeSurfaceInsteadOfOnlyItsFirstRows() throws {
+        // Input order is grouped by quadrant. A source-order fill would spend
+        // the entire budget on the first patch before visiting the other three.
+        let centers: [SIMD3<Float>] = [SIMD3(-0.02, -0.02, 0.04), SIMD3(0.02, -0.02, 0.04),
+                                      SIMD3(-0.02, 0.02, 0.04), SIMD3(0.02, 0.02, 0.04)]
+        let source = centers.flatMap { patch(spacing: 0.0005, center: $0) }
+        var settings = ScanEnhancementSettings()
+        settings.resolutionMultiplier = 4
+        settings.maximumPointCount = source.count + 64
+        let result = try PointCloudDisplayEnhancer.process(source, settings: settings)
+        let generated = result.vertices.dropFirst(source.count)
+
+        XCTAssertEqual(result.addedPointCount, 64)
+        XCTAssertTrue(result.reachedLimit)
+        for center in centers {
+            let coveredCount = generated.filter {
+                ($0.position.x < 0) == (center.x < 0) && ($0.position.y < 0) == (center.y < 0)
+            }.count
+            XCTAssertGreaterThan(coveredCount, 0,
+                                 "A limited point budget should still refine all supported surface regions.")
+        }
     }
 
     func testBudgetCapsAdditionsAndNeverDropsOriginalMeasurements() throws {
@@ -159,10 +258,14 @@ final class PointCloudDisplayEnhancerTests: XCTestCase {
     }
 
     private func flatPatch() -> [ScanVertex] {
+        patch(spacing: 0.002)
+    }
+
+    private func patch(spacing: Float, center: SIMD3<Float> = SIMD3(0, 0, 0.04)) -> [ScanVertex] {
         var vertices: [ScanVertex] = []
         for row in -5...5 {
             for column in -5...5 {
-                vertices.append(ScanVertex(position: SIMD3(Float(column) * 0.002, Float(row) * 0.002, 0.04),
+                vertices.append(ScanVertex(position: center + SIMD3(Float(column) * spacing, Float(row) * spacing, 0),
                                            color: SIMD3(0.4, 0.5, 0.6)))
             }
         }
