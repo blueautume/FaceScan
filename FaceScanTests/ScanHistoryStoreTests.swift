@@ -195,6 +195,106 @@ final class ScanHistoryStoreTests: XCTestCase {
         XCTAssertNil(history.errorMessage)
     }
 
+    @MainActor
+    func testVisibleThumbnailRequestsCoalesceAndMemoryCacheHasBoundedRecency() async throws {
+        let disk = HistoryTestDisk(), previews = HistoryThumbnailGate()
+        let history = makeStore(disk, thumbnails: previews)
+        let source = fixture()
+        history.recordCompletedScan(source)
+        await history.waitUntilIdle()
+        let firstEntry = try XCTUnwrap(history.entries.first)
+        await previews.hold(firstEntry.id)
+        let first = Task { @MainActor in try await history.thumbnail(for: firstEntry) }
+        await previews.waitForRequest(firstEntry.id)
+        let second = Task { @MainActor in try await history.thumbnail(for: firstEntry) }
+        // Yield to let both row requests join the same pending operation.
+        await Task.yield()
+        await previews.release(firstEntry.id)
+        let firstData = try await first.value
+        let secondData = try await second.value
+        XCTAssertEqual(firstData, secondData)
+        XCTAssertNotNil(firstData)
+        let cached = try await history.thumbnail(for: firstEntry)
+        XCTAssertEqual(cached, firstData)
+        let initialRequests = await previews.requestCount(firstEntry.id)
+        XCTAssertEqual(initialRequests, 1)
+
+        // More than the 24-item cache must evict old PNG data without removing
+        // any original history entry. No previews are fetched before requested.
+        var extraEntries: [ScanHistoryEntry] = []
+        for index in 0..<25 {
+            extraEntries.append(try await disk.save(fixture(), id: UUID(), date: Date(timeIntervalSince1970: Double(index))))
+        }
+        history.refresh()
+        await history.waitUntilIdle()
+        for entry in extraEntries { _ = try await history.thumbnail(for: entry) }
+        let countBeforeReload = await previews.totalRequests
+        XCTAssertEqual(countBeforeReload, 26)
+        _ = try await history.thumbnail(for: firstEntry)
+        let reloadedRequests = await previews.requestCount(firstEntry.id)
+        XCTAssertEqual(reloadedRequests, 2, "An evicted preview is generated again when it becomes visible.")
+        XCTAssertEqual(history.entries.count, 26)
+    }
+
+    @MainActor
+    func testDeletingOrClearingDropsNonCooperativeLateThumbnailResults() async throws {
+        let disk = HistoryTestDisk(), previews = HistoryThumbnailGate()
+        let history = makeStore(disk, thumbnails: previews)
+        for clearing in [false, true] {
+            history.recordCompletedScan(fixture())
+            await history.waitUntilIdle()
+            let entry = try XCTUnwrap(history.entries.first)
+            await previews.hold(entry.id)
+            let request = Task { @MainActor in try await history.thumbnail(for: entry) }
+            await previews.waitForRequest(entry.id)
+            if clearing { history.clearAll() }
+            else { history.delete(entry) }
+            await history.waitUntilIdle()
+            await previews.release(entry.id)
+            do {
+                let late = try await request.value
+                XCTAssertNil(late)
+            } catch is CancellationError {}
+            XCTAssertFalse(history.entries.contains { $0.id == entry.id })
+            let removed = try await history.thumbnail(for: entry)
+            XCTAssertNil(removed)
+            let count = await previews.requestCount(entry.id)
+            XCTAssertEqual(count, 1, "Removed scans must not issue another preview request.")
+            XCTAssertNil(history.errorMessage)
+        }
+    }
+
+    @MainActor
+    func testThumbnailCacheIsClearedWithHistoryAndFailuresCanRetryWithoutGlobalError() async throws {
+        let disk = HistoryTestDisk(), previews = HistoryThumbnailGate()
+        let history = makeStore(disk, thumbnails: previews)
+        let source = fixture()
+        history.recordCompletedScan(source)
+        await history.waitUntilIdle()
+        let entry = try XCTUnwrap(history.entries.first)
+        await previews.setFailure(true)
+        do {
+            _ = try await history.thumbnail(for: entry)
+            XCTFail("A preview failure should be returned to its row.")
+        } catch {}
+        XCTAssertNil(history.errorMessage)
+        XCTAssertFalse(history.hasFailedSaves)
+        await previews.setFailure(false)
+        let retried = try await history.thumbnail(for: entry)
+        XCTAssertNotNil(retried)
+        history.clearAll()
+        await history.waitUntilIdle()
+        // Simulate a library reloaded from a newer disk state with this ID.
+        _ = try await disk.save(source, id: entry.id, date: entry.createdAt)
+        history.refresh()
+        await history.waitUntilIdle()
+        let reloaded = try await history.thumbnail(for: entry)
+        XCTAssertNotNil(reloaded)
+        let count = await previews.requestCount(entry.id)
+        XCTAssertEqual(count, 3, "Clearing history must discard cached preview data as well as originals.")
+        XCTAssertNil(history.errorMessage)
+    }
+
     #if DEBUG
     @MainActor
     func testExplicitPreviewFixtureIsMarkedSyntheticAndUsesStableIdentity() async throws {
@@ -215,13 +315,17 @@ final class ScanHistoryStoreTests: XCTestCase {
     #endif
 
     @MainActor
-    private func makeStore(_ disk: HistoryTestDisk) -> ScanHistoryStore {
+    private func makeStore(_ disk: HistoryTestDisk, thumbnails: HistoryThumbnailGate? = nil) -> ScanHistoryStore {
         ScanHistoryStore(operations: .init(
             list: { await disk.list() },
             save: { try await disk.save($0, id: $1, date: $2) },
             load: { try await disk.load($0) },
             delete: { await disk.delete($0) },
-            deleteAll: { try await disk.clear() }))
+            deleteAll: { try await disk.clear() },
+            thumbnail: { entry in
+                guard let thumbnails else { return nil }
+                return try await thumbnails.preview(entry)
+            }))
     }
 
     private func fixture() -> ScanMesh {
@@ -231,6 +335,39 @@ final class ScanHistoryStoreTests: XCTestCase {
             ScanVertex(position: SIMD3(0, 0.002, 0.02), color: SIMD3(0.6, 0.4, 0.3))
         ], triangleIndices: [0, 1, 2], frameCount: 8, coveredAngles: [.center, .left])
     }
+}
+
+/// Intentionally ignores task cancellation while held, so store generation
+/// checks are tested against a worker that completes after the row is removed.
+private actor HistoryThumbnailGate {
+    private var counts: [UUID: Int] = [:]
+    private var held: Set<UUID> = []
+    private var pending: [UUID: CheckedContinuation<Void, Never>] = [:]
+    private var waiters: [UUID: [CheckedContinuation<Void, Never>]] = [:]
+    private var fails = false
+    var totalRequests: Int { counts.values.reduce(0, +) }
+
+    func requestCount(_ id: UUID) -> Int { counts[id, default: 0] }
+    func hold(_ id: UUID) { held.insert(id) }
+    func setFailure(_ value: Bool) { fails = value }
+    func waitForRequest(_ id: UUID) async {
+        guard counts[id, default: 0] == 0 else { return }
+        await withCheckedContinuation { waiters[id, default: []].append($0) }
+    }
+    func release(_ id: UUID) {
+        held.remove(id)
+        pending.removeValue(forKey: id)?.resume()
+    }
+    func preview(_ entry: ScanHistoryEntry) async throws -> Data? {
+        counts[entry.id, default: 0] += 1
+        waiters.removeValue(forKey: entry.id)?.forEach { $0.resume() }
+        if held.contains(entry.id) {
+            await withCheckedContinuation { pending[entry.id] = $0 }
+        }
+        if fails { throw Failure.failed }
+        return Data("preview-\(entry.id.uuidString)".utf8)
+    }
+    private enum Failure: Error { case failed }
 }
 
 private actor HistoryTestDisk {

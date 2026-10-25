@@ -186,6 +186,66 @@ final class ScanHistoryRepositoryTests: XCTestCase {
         XCTAssertTrue(entries.isEmpty)
     }
 
+    func testLegacyThumbnailBackfillAndCorruptCacheLeaveOriginalArchiveUnchanged() async throws {
+        let folder = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let repository = ScanHistoryRepository(directory: folder)
+        let entry = try await repository.save(fixture(), id: UUID())
+        let record = folder.appendingPathComponent(entry.id.uuidString)
+        let payload = record.appendingPathComponent("points.bin")
+        let metadata = record.appendingPathComponent("metadata.json")
+        let thumbnail = record.appendingPathComponent("thumbnail-v1.png")
+        let originalPayload = try Data(contentsOf: payload)
+        let originalMetadata = try Data(contentsOf: metadata)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: thumbnail.path),
+                       "Saving originals must not eagerly render the entire history library.")
+
+        let first = try await repository.thumbnail(for: entry)
+        XCTAssertTrue(ScanHistoryThumbnailRenderer.isValidCache(first))
+        XCTAssertEqual(try Data(contentsOf: thumbnail), first)
+        let relaunched = ScanHistoryRepository(directory: folder)
+        let reused = try await relaunched.thumbnail(for: entry)
+        XCTAssertEqual(reused, first)
+
+        try Data("corrupted PNG".utf8).write(to: thumbnail)
+        let repaired = try await relaunched.thumbnail(for: entry)
+        XCTAssertTrue(ScanHistoryThumbnailRenderer.isValidCache(repaired))
+        XCTAssertEqual(try Data(contentsOf: thumbnail), repaired)
+        XCTAssertEqual(try Data(contentsOf: payload), originalPayload)
+        XCTAssertEqual(try Data(contentsOf: metadata), originalMetadata)
+
+        // Reading a cache is bounded, even if an older/bad cache claims to be
+        // an image. Regeneration still uses the untouched original archive.
+        try Data(repeating: 0, count: 2 * 1_024 * 1_024 + 1).write(to: thumbnail)
+        let boundedRepair = try await relaunched.thumbnail(for: entry)
+        XCTAssertTrue(ScanHistoryThumbnailRenderer.isValidCache(boundedRepair))
+        XCTAssertEqual(try Data(contentsOf: payload), originalPayload)
+    }
+
+    func testThumbnailCacheWriteFailureKeepsPreviewAndDeletionNeverRecreatesHistory() async throws {
+        let folder = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let repository = ScanHistoryRepository(directory: folder)
+        let entry = try await repository.save(fixture(), id: UUID())
+        let record = folder.appendingPathComponent(entry.id.uuidString)
+        let cache = record.appendingPathComponent("thumbnail-v1.png", isDirectory: true)
+        // A directory in place of the disposable cache makes atomic PNG writes
+        // fail without relying on process privileges or filesystem free space.
+        try FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
+        let generated = try await repository.thumbnail(for: entry)
+        XCTAssertTrue(ScanHistoryThumbnailRenderer.isValidCache(generated))
+        let original = try await repository.load(entry)
+        assertExact(original, fixture())
+        try await repository.delete(entry)
+        do {
+            _ = try await repository.thumbnail(for: entry)
+            XCTFail("A late thumbnail request must not resurrect a removed history directory.")
+        } catch { XCTAssertEqual(error as? ScanHistoryRepository.HistoryError, .missingRecord) }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: record.path))
+        let entries = try await repository.list()
+        XCTAssertTrue(entries.isEmpty)
+    }
+
     private func assertSaveFails(_ mesh: ScanMesh, repository: ScanHistoryRepository,
                                  expected: ScanHistoryRepository.HistoryError,
                                  file: StaticString = #filePath, line: UInt = #line) async {

@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// Lists immutable original scans. Opening an entry returns it to the same
 /// result workspace, where filtering and display enhancement remain copies.
@@ -134,15 +135,12 @@ struct ScanHistoryView: View {
 
     private func recordRow(_ entry: ScanHistoryEntry) -> some View {
         HStack(spacing: 12) {
-            Image(systemName: "point.3.connected.trianglepath.dotted")
-                .font(.system(size: 23, weight: .light))
-                .foregroundStyle(ScanTheme.tint)
-                .frame(width: 32)
-                .accessibilityHidden(true)
+            ScanHistoryThumbnail(entry: entry, history: history)
             VStack(alignment: .leading, spacing: 6) {
                 Text(entry.createdAt.formatted(date: .numeric, time: .standard))
-                    .font(.system(size: 15, weight: .medium))
+                    .font(.system(size: 14, weight: .medium))
                     .foregroundStyle(ScanTheme.primary)
+                    .lineLimit(2)
                 Text("\(entry.vertexCount) 点 · \(entry.frameCount) 帧 · \(entry.coveredAngles.count)/\(ScanAngle.allCases.count) 视角")
                     .font(.system(size: 12).monospacedDigit())
                     .foregroundStyle(ScanTheme.secondary)
@@ -163,5 +161,51 @@ struct ScanHistoryView: View {
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
         .accessibilityHint("打开原始点云，可重新滤波、增强或导出。")
+    }
+}
+
+/// A cached image of the original points. Only visible list rows request work;
+/// disappearing rows can cancel without affecting the stored original.
+private struct ScanHistoryThumbnail: View {
+    let entry: ScanHistoryEntry
+    @ObservedObject var history: ScanHistoryStore
+    @State private var image: UIImage?
+    @State private var isLoading = true
+
+    var body: some View {
+        ZStack {
+            ScanTheme.canvas
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+            } else if isLoading {
+                ProgressView()
+                    .tint(ScanTheme.canvasAccent)
+            } else {
+                Image(systemName: "point.3.connected.trianglepath.dotted")
+                    .font(.system(size: 25, weight: .light))
+                    .foregroundStyle(ScanTheme.canvasAccent.opacity(0.65))
+            }
+        }
+        .frame(width: 88, height: 88)
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .overlay {
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(ScanTheme.canvasTrack.opacity(0.5), lineWidth: 0.5)
+        }
+        .accessibilityHidden(true)
+        .task(id: entry.id) {
+            isLoading = true
+            image = nil
+            do {
+                let data = try await history.thumbnail(for: entry)
+                guard !Task.isCancelled else { return }
+                image = data.flatMap { UIImage(data: $0) }
+            } catch {
+                guard !Task.isCancelled else { return }
+            }
+            isLoading = false
+        }
     }
 }

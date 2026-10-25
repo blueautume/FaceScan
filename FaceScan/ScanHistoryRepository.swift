@@ -92,6 +92,7 @@ actor ScanHistoryRepository {
     private static let maximumVertices = 500_000
     private static let maximumTriangles = 1_000_000
     private static let maximumMetadataBytes = 64 * 1_024
+    private static let maximumThumbnailBytes = 2 * 1_024 * 1_024
     private let directory: URL
     private let fileManager = FileManager.default
 
@@ -165,6 +166,36 @@ actor ScanHistoryRepository {
             throw HistoryError.damagedRecord
         }
         return try decode(data, entry: metadata.entry)
+    }
+
+    /// Previews are disposable derived data. Old records acquire a thumbnail
+    /// only when requested; neither the original payload nor its metadata is
+    /// rewritten. Running on this actor serializes generation with deletion.
+    func thumbnail(for entry: ScanHistoryEntry) throws -> Data {
+        try Task.checkCancellation()
+        _ = try readMetadata(id: entry.id)
+        let cache = recordDirectory(entry.id).appendingPathComponent("thumbnail-v1.png")
+        if let data = try? readLimitedFile(cache, maximumBytes: Self.maximumThumbnailBytes),
+           ScanHistoryThumbnailRenderer.isValidCache(data) {
+            try Task.checkCancellation()
+            return data
+        }
+        let original = try load(entry)
+        let data = try ScanHistoryThumbnailRenderer.render(original)
+        try Task.checkCancellation()
+        guard data.count <= Self.maximumThumbnailBytes, ScanHistoryThumbnailRenderer.isValidCache(data) else {
+            throw HistoryError.damagedRecord
+        }
+        // A second repository instance may have deleted this record. Never
+        // recreate a directory merely to store its optional image cache.
+        _ = try readMetadata(id: entry.id)
+        do {
+            try write(data, to: cache)
+        } catch {
+            // A full disk or unwritable cache must not lose the raw history or
+            // prevent showing an already rendered, valid in-memory preview.
+        }
+        return data
     }
 
     func delete(_ entry: ScanHistoryEntry) throws {

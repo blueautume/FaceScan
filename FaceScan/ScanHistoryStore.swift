@@ -14,6 +14,7 @@ final class ScanHistoryStore: ObservableObject {
         var load: @Sendable (ScanHistoryEntry) async throws -> ScanMesh
         var delete: @Sendable (ScanHistoryEntry) async throws -> Void
         var deleteAll: @Sendable () async throws -> Void
+        var thumbnail: @Sendable (ScanHistoryEntry) async throws -> Data? = { _ in nil }
     }
 
     @Published private(set) var entries: [ScanHistoryEntry] = []
@@ -39,6 +40,15 @@ final class ScanHistoryStore: ObservableObject {
     // a deliberately removed scan back during this app session.
     private var recordedIDs: Set<UUID> = []
     private var pending: [UUID: PendingSave] = [:]
+    private struct ThumbnailRequest {
+        let id: UUID
+        let task: Task<Data?, Error>
+    }
+    private var thumbnailRequests: [UUID: ThumbnailRequest] = [:]
+    private var thumbnailCache: [UUID: Data] = [:]
+    private var thumbnailRecency: [UUID] = []
+    private var deletingThumbnailIDs: Set<UUID> = []
+    private static let maximumCachedThumbnails = 24
 
     convenience init(repository: ScanHistoryRepository = ScanHistoryRepository()) {
         self.init(operations: Operations(
@@ -46,11 +56,16 @@ final class ScanHistoryStore: ObservableObject {
             save: { try await repository.save($0, id: $1, createdAt: $2) },
             load: { try await repository.load($0) },
             delete: { try await repository.delete($0) },
-            deleteAll: { try await repository.deleteAll() }))
+            deleteAll: { try await repository.deleteAll() },
+            thumbnail: { try await repository.thumbnail(for: $0) }))
     }
 
     init(operations: Operations) {
         self.operations = operations
+    }
+
+    deinit {
+        thumbnailRequests.values.forEach { $0.task.cancel() }
     }
 
     func refresh() {
@@ -64,6 +79,7 @@ final class ScanHistoryStore: ObservableObject {
                 let entries = try await store.operations.list()
                 guard store.generation == epoch, store.refreshGeneration == request else { return }
                 store.entries = Self.sorted(entries)
+                store.pruneThumbnails()
                 store.recordedIDs.formUnion(entries.map(\.id))
                 if !store.hasFailedSaves { store.errorMessage = nil }
             } catch {
@@ -117,8 +133,59 @@ final class ScanHistoryStore: ObservableObject {
         return mesh
     }
 
+    /// The list calls this for visible rows. Multiple callers share one job;
+    /// completed PNG data is kept in a small LRU rather than decoding every
+    /// historical scan up front. Thumbnail failures never become save errors.
+    func thumbnail(for entry: ScanHistoryEntry) async throws -> Data? {
+        try Task.checkCancellation()
+        let epoch = generation
+        guard canDisplayThumbnail(entry.id) else { return nil }
+        if let data = thumbnailCache[entry.id] {
+            touchThumbnail(entry.id)
+            return data
+        }
+        let task: Task<Data?, Error>
+        if let existing = thumbnailRequests[entry.id] {
+            task = existing.task
+        } else {
+            let request = UUID()
+            let operation = operations.thumbnail
+            task = Task { @MainActor [weak self] in
+                do {
+                    let data = try await operation(entry)
+                    try Task.checkCancellation()
+                    guard let self, self.generation == epoch,
+                          self.thumbnailRequests[entry.id]?.id == request,
+                          self.canDisplayThumbnail(entry.id) else { return nil }
+                    self.thumbnailRequests.removeValue(forKey: entry.id)
+                    if let data, data.count <= 2 * 1_024 * 1_024 {
+                        self.thumbnailCache[entry.id] = data
+                        self.touchThumbnail(entry.id)
+                        while self.thumbnailRecency.count > Self.maximumCachedThumbnails {
+                            let oldest = self.thumbnailRecency.removeFirst()
+                            self.thumbnailCache.removeValue(forKey: oldest)
+                        }
+                    }
+                    return data
+                } catch {
+                    if let self, self.thumbnailRequests[entry.id]?.id == request {
+                        self.thumbnailRequests.removeValue(forKey: entry.id)
+                    }
+                    throw error
+                }
+            }
+            thumbnailRequests[entry.id] = ThumbnailRequest(id: request, task: task)
+        }
+        let data = try await task.value
+        try Task.checkCancellation()
+        guard generation == epoch, canDisplayThumbnail(entry.id) else { return nil }
+        return data
+    }
+
     func delete(_ entry: ScanHistoryEntry) {
         let epoch = generation
+        deletingThumbnailIDs.insert(entry.id)
+        discardThumbnail(entry.id)
         enqueue { store in
             guard store.generation == epoch else { return }
             let background = ScanHistoryBackgroundActivity(name: "删除扫描历史")
@@ -127,11 +194,13 @@ final class ScanHistoryStore: ObservableObject {
                 try await store.operations.delete(entry)
                 guard store.generation == epoch else { return }
                 store.entries.removeAll { $0.id == entry.id }
+                store.discardThumbnail(entry.id)
                 if !store.hasFailedSaves { store.errorMessage = nil }
             } catch {
                 guard store.generation == epoch else { return }
                 store.errorMessage = "无法删除这份历史记录：\(error.localizedDescription)"
             }
+            store.deletingThumbnailIDs.remove(entry.id)
         }
     }
 
@@ -143,6 +212,7 @@ final class ScanHistoryStore: ObservableObject {
         let epoch = generation
         pending.removeAll()
         entries.removeAll()
+        discardAllThumbnails()
         isLoading = false
         isClearing = true
         errorMessage = nil
@@ -210,6 +280,35 @@ final class ScanHistoryStore: ObservableObject {
     private func updateSaveState() {
         isSaving = pending.values.contains { $0.isQueued }
         hasFailedSaves = pending.values.contains { !$0.isQueued }
+    }
+
+    private func canDisplayThumbnail(_ id: UUID) -> Bool {
+        !isClearing && !deletingThumbnailIDs.contains(id) && entries.contains { $0.id == id }
+    }
+
+    private func touchThumbnail(_ id: UUID) {
+        thumbnailRecency.removeAll { $0 == id }
+        thumbnailRecency.append(id)
+    }
+
+    private func discardThumbnail(_ id: UUID) {
+        thumbnailRequests.removeValue(forKey: id)?.task.cancel()
+        thumbnailCache.removeValue(forKey: id)
+        thumbnailRecency.removeAll { $0 == id }
+    }
+
+    private func discardAllThumbnails() {
+        thumbnailRequests.values.forEach { $0.task.cancel() }
+        thumbnailRequests.removeAll()
+        thumbnailCache.removeAll()
+        thumbnailRecency.removeAll()
+        deletingThumbnailIDs.removeAll()
+    }
+
+    private func pruneThumbnails() {
+        let validIDs = Set(entries.map(\.id))
+        let stale = Set(thumbnailRequests.keys).union(thumbnailCache.keys).subtracting(validIDs)
+        for id in stale { discardThumbnail(id) }
     }
 
     private func enqueue(_ operation: @escaping @MainActor (ScanHistoryStore) async -> Void) {
