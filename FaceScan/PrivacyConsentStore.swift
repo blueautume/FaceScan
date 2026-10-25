@@ -5,7 +5,7 @@ import Foundation
 /// A changed policy version requires fresh consent before camera preparation.
 @MainActor
 final class PrivacyConsentStore: ObservableObject {
-    nonisolated static let currentVersion = 2
+    nonisolated static let currentVersion = 3
     nonisolated static let acceptedVersionKey = "FaceScan.privacy.acceptedVersion"
 
     @Published private(set) var isAccepted: Bool

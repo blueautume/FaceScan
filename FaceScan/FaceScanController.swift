@@ -29,6 +29,7 @@ final class FaceScanController: NSObject, ObservableObject {
     let livePose: LiveFacePoseStore
 
     private let privacyConsent: PrivacyConsentStore
+    private let onCompletedScan: ((ScanMesh) -> Void)?
     private let worker: FaceScanWorker
     private var generation = UUID()
     private var isSessionRunning = false
@@ -37,8 +38,9 @@ final class FaceScanController: NSObject, ObservableObject {
     private var isRequestingPermission = false
     private var isViewingFile = false
     private var observers: [NSObjectProtocol] = []
-    init(privacyConsent: PrivacyConsentStore) {
+    init(privacyConsent: PrivacyConsentStore, onCompletedScan: ((ScanMesh) -> Void)? = nil) {
         self.privacyConsent = privacyConsent
+        self.onCompletedScan = onCompletedScan
         let pose = LiveFacePoseStore()
         livePose = pose
         worker = FaceScanWorker(poseStore: pose)
@@ -235,16 +237,7 @@ final class FaceScanController: NSObject, ObservableObject {
             progress = update
             hint = update.hint
         case .finished(let mesh):
-            guard phase == .processing else { return }
-            result = mesh
-            livePointCloud = LivePointCloudSnapshot(
-                revision: mesh.frameCount + 1, vertices: mesh.vertices,
-                confirmedPointCount: mesh.vertexCount)
-            phase = .complete
-            hint = "拖动旋转 · 双指缩放"
-            isSessionRunning = false
-            isInterrupted = false
-            session.pause()
+            finishProcessing(mesh)
         case .finishRejected(let message):
             guard phase == .processing else { return }
             generation = UUID()
@@ -279,6 +272,22 @@ final class FaceScanController: NSObject, ObservableObject {
         case .interruptionEnded:
             break
         }
+    }
+
+    /// Hand the original worker result to history independently of later scans
+    /// or presentations. Repeated/late completion is ignored.
+    func finishProcessing(_ mesh: ScanMesh) {
+        guard privacyConsent.isAccepted, phase == .processing else { return }
+        result = mesh
+        livePointCloud = LivePointCloudSnapshot(
+            revision: mesh.frameCount + 1, vertices: mesh.vertices,
+            confirmedPointCount: mesh.vertexCount)
+        phase = .complete
+        hint = "拖动旋转 · 双指缩放"
+        isSessionRunning = false
+        isInterrupted = false
+        session.pause()
+        onCompletedScan?(mesh)
     }
 
     private func unavailable(_ message: String) {
