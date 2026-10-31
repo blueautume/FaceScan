@@ -157,6 +157,58 @@ final class ScanFilterSettingsTests: XCTestCase {
                        "The old preset remains a valid explicit selection in the new format.")
     }
 
+    func testCustomSettingsSurviveRepeatedLoadsAndSaves() throws {
+        let suiteName = "FaceScan-filter-settings-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let legacyData = try JSONEncoder().encode(ScanFilterSettings.reference)
+        defaults.set(legacyData, forKey: ScanFilterSettings.legacyStorageKey)
+        var custom = ScanFilterSettings.standard
+        custom.medianWindow = 5
+        custom.parameterGridSize = 0.001
+        custom.filterColors = true
+        custom.smoothingCurve = FaceCloudSmoothingCurve(
+            strengths: [0.95, 0.8, 0.55, 0.3, 0.1],
+            maximumVariation: 0.006,
+            neighborhoodRadius: 0.0055)
+        custom.save(to: defaults)
+
+        for _ in 0..<3 {
+            let reopenedDefaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+            let restored = ScanFilterSettings.load(from: reopenedDefaults)
+            XCTAssertEqual(restored, custom, "Opening settings again must retain the user's complete profile.")
+            restored.save(to: reopenedDefaults)
+        }
+        XCTAssertEqual(defaults.data(forKey: ScanFilterSettings.legacyStorageKey), legacyData)
+    }
+
+    func testSavedExplicitResetRemainsStandardAcrossLoadsWithoutRevivingLegacyCustomSettings() throws {
+        let suiteName = "FaceScan-filter-settings-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        var legacyCustom = ScanFilterSettings.reference
+        legacyCustom.sorNeighbors = 32
+        let legacyData = try JSONEncoder().encode(legacyCustom)
+        defaults.set(legacyData, forKey: ScanFilterSettings.legacyStorageKey)
+        var currentCustom = ScanFilterSettings.standard
+        currentCustom.medianWindow = 7
+        currentCustom.smoothingCurve?.strengths[4] = 0.2
+        currentCustom.save(to: defaults)
+        XCTAssertEqual(ScanFilterSettings.load(from: defaults), currentCustom)
+
+        // The reset action saves the standard profile; it does not remove v2,
+        // because removing that key would allow old v1 preferences to return.
+        ScanFilterSettings.standard.save(to: defaults)
+        for _ in 0..<3 {
+            let reopenedDefaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+            let restored = ScanFilterSettings.load(from: reopenedDefaults)
+            XCTAssertEqual(restored, .standard)
+            restored.save(to: reopenedDefaults)
+        }
+        XCTAssertNotNil(defaults.data(forKey: ScanFilterSettings.storageKey))
+        XCTAssertEqual(defaults.data(forKey: ScanFilterSettings.legacyStorageKey), legacyData)
+    }
+
     func testInvalidDraftDoesNotOverwriteSavedSettingsAndValidationHandlesExtremeIntegers() throws {
         let suiteName = "FaceScan-filter-settings-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))

@@ -389,34 +389,21 @@ struct ContentView: View {
                 ScanPointSizeControl(title: "点大小", scale: $resultPointSizeScale)
                     .frame(minHeight: 38)
 
-                Button {
-                    showsFilterSettings = true
-                } label: {
-                    HStack(spacing: 8) {
+                HStack {
+                    Button {
+                        showsFilterSettings = true
+                    } label: {
                         Label("滤波参数", systemImage: "slider.horizontal.3")
-                        Spacer(minLength: 8)
-                        Text(filterSettings.presetName)
-                            .foregroundStyle(ScanTheme.secondary)
-                        if let filteredResult, filteredResult.settings != filterSettings {
-                            Circle().fill(ScanTheme.tint).frame(width: 6, height: 6)
-                                .accessibilityHidden(true)
-                        }
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(ScanTheme.secondary)
+                            .font(.system(size: 14, weight: .medium))
+                            .frame(minHeight: 44)
+                            .contentShape(Rectangle())
                     }
-                    .font(.system(size: 14, weight: .medium))
-                    .padding(.horizontal, 14)
-                    .frame(maxWidth: .infinity, minHeight: 44)
-                    .background(ScanTheme.card, in: RoundedRectangle(cornerRadius: 13))
-                    .contentShape(Rectangle())
+                    .buttonStyle(.plain)
+                    .disabled(exporting || scanFilter.isFiltering)
+                    .accessibilityIdentifier("filter.settings")
+                    .accessibilityHint("调整滤波参数")
+                    Spacer(minLength: 0)
                 }
-                .buttonStyle(.plain)
-                .disabled(exporting || scanFilter.isFiltering)
-                .accessibilityIdentifier("filter.settings")
-                .accessibilityValue(filterSettings.presetName)
-                .accessibilityHint(filteredResult.map { $0.settings != filterSettings } == true
-                                   ? "参数已更改，下次滤波时应用" : "调整滤波参数")
 
                 HStack(spacing: 12) {
                     ScanFilterActionButton(isFiltering: scanFilter.isFiltering,

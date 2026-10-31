@@ -11,17 +11,6 @@ struct ScanFilterSettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section {
-                    HStack(spacing: 12) {
-                        presetButton("默认", value: .standard)
-                        presetButton("参考参数", value: .reference)
-                    }
-                    LabeledContent("当前参数", value: settings.presetName)
-                        .font(.subheadline)
-                } footer: {
-                    Text("默认启用 3 × 3 中值与平滑强度曲线，并保留原始颜色。调整后点“应用并滤波”，每次都从原始扫描重新计算。")
-                }
-
                 curveSection
                 geometrySection
                 outlierSection
@@ -35,6 +24,15 @@ struct ScanFilterSettingsView: View {
             .navigationTitle("滤波参数")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("重置参数") {
+                        settings = .standard
+                        lastCurve = ScanFilterSettings.standard.smoothingCurve ?? .featurePreserving
+                        settings.save()
+                    }
+                    .disabled(settings == .standard)
+                    .accessibilityIdentifier("filterSettings.reset")
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("完成") { dismiss() }
                 }
@@ -46,8 +44,11 @@ struct ScanFilterSettingsView: View {
                             .font(.caption)
                             .foregroundStyle(ScanTheme.destructive)
                     }
-                    Button(action: onApply) {
-                        Text("应用并滤波")
+                    Button {
+                        settings.save()
+                        onApply()
+                    } label: {
+                        Text("保存并滤波")
                             .font(.system(size: 16, weight: .semibold))
                             .frame(maxWidth: .infinity, minHeight: 52)
                     }
@@ -194,21 +195,6 @@ struct ScanFilterSettingsView: View {
         } footer: {
             Text("长度均以毫米显示。柱心和参考半径决定柱面参数化，一般保持默认即可。更细的网格会增加耗时与内存使用。")
         }
-    }
-
-    private func presetButton(_ title: String, value: ScanFilterSettings) -> some View {
-        Button {
-            settings = value
-        } label: {
-            HStack(spacing: 6) {
-                if settings == value { Image(systemName: "checkmark") }
-                Text(title)
-            }
-            .frame(maxWidth: .infinity, minHeight: 30)
-        }
-        .buttonStyle(.bordered)
-        .tint(ScanTheme.tint)
-        .accessibilityLabel("使用\(title)预设")
     }
 
     private func parameterLabel(_ title: String, value: String) -> some View {
