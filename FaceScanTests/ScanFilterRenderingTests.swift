@@ -14,12 +14,13 @@ final class ScanFilterRenderingTests: XCTestCase {
         let snapshot = LivePointCloudSnapshot(revision: 9, vertices: original.vertices,
                                              confirmedPointCount: original.vertexCount)
         coordinator.update(snapshot: snapshot, surfaceMesh: original,
-                           resultFramingIdentity: original.renderIdentity, displayStyle: .color, in: view)
+                           resultFramingIdentity: original.renderIdentity, pointSizeScale: 2, in: view)
         await coordinator.waitForPendingUpdates()
         let node = try XCTUnwrap(view.poseNode)
         let camera = try XCTUnwrap(view.pointOfView)
         let originalGeometry = try XCTUnwrap(node.geometry)
-        XCTAssertEqual(originalGeometry.elements.first?.primitiveType, .triangles)
+        XCTAssertEqual(originalGeometry.elements.first?.primitiveType, .point)
+        XCTAssertEqual(originalGeometry.elements.first?.pointSize ?? 0, 0.0014 * 2, accuracy: 1e-8)
 
         camera.position = SCNVector3(0.12, 0.08, 0.51)
         camera.eulerAngles = SCNVector3(0.1, -0.2, 0.05)
@@ -29,12 +30,13 @@ final class ScanFilterRenderingTests: XCTestCase {
         let modelTransform = node.simdTransform
 
         coordinator.update(snapshot: snapshot, surfaceMesh: filtered,
-                           resultFramingIdentity: original.renderIdentity, displayStyle: .color, in: view)
+                           resultFramingIdentity: original.renderIdentity, pointSizeScale: 2, in: view)
         await coordinator.waitForPendingUpdates()
         let filteredGeometry = try XCTUnwrap(node.geometry)
         XCTAssertFalse(filteredGeometry === originalGeometry)
         XCTAssertEqual(filteredGeometry.elements.first?.primitiveType, .point,
                        "Filtered point clouds cannot reuse the original triangle topology.")
+        XCTAssertEqual(filteredGeometry.elements.first?.pointSize ?? 0, 0.0014 * 2, accuracy: 1e-8)
         try assertGeometry(filteredGeometry, matches: filtered.vertices)
         XCTAssertEqual(camera.simdTransform, cameraTransform)
         XCTAssertEqual(node.simdTransform, modelTransform)
@@ -42,10 +44,11 @@ final class ScanFilterRenderingTests: XCTestCase {
                        "The result label must use the displayed mesh rather than the stale live snapshot.")
 
         coordinator.update(snapshot: snapshot, surfaceMesh: original,
-                           resultFramingIdentity: original.renderIdentity, displayStyle: .color, in: view)
+                           resultFramingIdentity: original.renderIdentity, pointSizeScale: 2, in: view)
         await coordinator.waitForPendingUpdates()
         let restoredGeometry = try XCTUnwrap(node.geometry)
-        XCTAssertEqual(restoredGeometry.elements.first?.primitiveType, .triangles)
+        XCTAssertEqual(restoredGeometry.elements.first?.primitiveType, .point)
+        XCTAssertEqual(restoredGeometry.elements.first?.pointSize ?? 0, 0.0014 * 2, accuracy: 1e-8)
         try assertGeometry(restoredGeometry, matches: original.vertices)
         XCTAssertEqual(camera.simdTransform, cameraTransform)
         XCTAssertEqual(node.simdTransform, modelTransform)

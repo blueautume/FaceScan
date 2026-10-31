@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import XCTest
 @testable import FaceScan
@@ -13,6 +14,7 @@ final class ScanFilterControllerTests: XCTestCase {
 
         controller.start(source)
         XCTAssertTrue(controller.isFiltering)
+        XCTAssertEqual(controller.progress, 0)
         XCTAssertEqual(controller.displayedMesh(for: source).renderIdentity, source.renderIdentity)
         await gate.waitForRequest(source.renderIdentity)
         controller.start(source)
@@ -20,6 +22,7 @@ final class ScanFilterControllerTests: XCTestCase {
         await controller.waitUntilFinished()
 
         XCTAssertFalse(controller.isFiltering)
+        XCTAssertEqual(controller.progress, 1)
         XCTAssertTrue(controller.showsFiltered)
         XCTAssertNil(controller.errorMessage)
         XCTAssertEqual(controller.displayedMesh(for: source).renderIdentity, output.mesh.renderIdentity)
@@ -120,11 +123,13 @@ final class ScanFilterControllerTests: XCTestCase {
         await controller.waitUntilFinished()
 
         XCTAssertFalse(controller.isFiltering)
+        XCTAssertEqual(controller.progress, 0)
         XCTAssertEqual(controller.errorMessage, "Test processing failure")
         XCTAssertNil(controller.result)
         XCTAssertEqual(controller.displayedMesh(for: source).renderIdentity, source.renderIdentity)
 
         controller.start(source)
+        XCTAssertEqual(controller.progress, 0)
         XCTAssertNil(controller.errorMessage)
         await gate.waitForRequest(source.renderIdentity)
         let output = filteredResult(from: source)
@@ -132,6 +137,120 @@ final class ScanFilterControllerTests: XCTestCase {
         await controller.waitUntilFinished()
         XCTAssertEqual(controller.displayedMesh(for: source).renderIdentity, output.mesh.renderIdentity)
         XCTAssertNil(controller.errorMessage)
+    }
+
+    @MainActor
+    func testProgressIsBoundedMonotonicAndFinishesAtOne() async throws {
+        let source = sourceMesh()
+        let gate = ProgressFilterWorkerGate()
+        let controller = ScanFilterController(progressProcessor: { mesh, settings, progress in
+            try await gate.process(mesh, settings: settings, progress: progress)
+        })
+        let partial = expectation(description: "First completed work")
+        let later = expectation(description: "Later completed work")
+        let bounded = expectation(description: "Out-of-range progress is bounded")
+        var completionPublications = 0
+        let subscription = controller.$progress.sink { value in
+            if value == 0.4 { partial.fulfill() }
+            if value == 0.8 { later.fulfill() }
+            if value == 1 {
+                completionPublications += 1
+                if completionPublications == 1 { bounded.fulfill() }
+            }
+        }
+        defer { subscription.cancel() }
+
+        controller.start(source)
+        await gate.waitForRequest(source.renderIdentity)
+        await gate.report(source.renderIdentity, value: 0.4)
+        await fulfillment(of: [partial], timeout: 2)
+        XCTAssertEqual(controller.progress, 0.4)
+        await gate.report(source.renderIdentity, value: 0.1)
+        await gate.report(source.renderIdentity, value: .nan)
+        await gate.report(source.renderIdentity, value: 0.8)
+        await fulfillment(of: [later], timeout: 2)
+        XCTAssertEqual(controller.progress, 0.8)
+        await gate.report(source.renderIdentity, value: 1.2)
+        await fulfillment(of: [bounded], timeout: 2)
+        XCTAssertEqual(controller.progress, 1)
+        await gate.succeed(source.renderIdentity, with: filteredResult(from: source))
+        await controller.waitUntilFinished()
+        XCTAssertEqual(controller.progress, 1)
+        XCTAssertEqual(completionPublications, 1,
+                       "Worker completion and publishing its accepted result must not emit duplicate completion.")
+        XCTAssertFalse(controller.isFiltering)
+        controller.cancel()
+        XCTAssertEqual(controller.progress, 0)
+        controller.start(source)
+        XCTAssertEqual(controller.progress, 1, "Showing a cached, complete result is immediately complete.")
+        XCTAssertFalse(controller.isFiltering)
+    }
+
+    @MainActor
+    func testCancelledWorkerCannotPublishProgressIntoTheNextScan() async throws {
+        let source = sourceMesh()
+        let nextSource = sourceMesh()
+        let gate = ProgressFilterWorkerGate()
+        let controller = ScanFilterController(progressProcessor: { mesh, settings, progress in
+            try await gate.process(mesh, settings: settings, progress: progress)
+        })
+        controller.start(source)
+        await gate.waitForRequest(source.renderIdentity)
+        let oldCompletion = await completionOfCurrentWork(controller)
+        controller.cancel()
+        XCTAssertEqual(controller.progress, 0)
+        controller.start(nextSource)
+        await gate.waitForRequest(nextSource.renderIdentity)
+
+        let nextProgress = expectation(description: "Only new scan progress")
+        let subscription = controller.$progress.sink { value in
+            if value == 0.25 { nextProgress.fulfill() }
+        }
+        defer { subscription.cancel() }
+        await gate.report(source.renderIdentity, value: 0.95)
+        await gate.report(nextSource.renderIdentity, value: 0.25)
+        await fulfillment(of: [nextProgress], timeout: 2)
+        await gate.succeed(source.renderIdentity, with: filteredResult(from: source))
+        await oldCompletion.value
+        XCTAssertEqual(controller.progress, 0.25)
+        XCTAssertTrue(controller.isFiltering)
+        XCTAssertNil(controller.result)
+
+        await gate.succeed(nextSource.renderIdentity, with: filteredResult(from: nextSource))
+        await controller.waitUntilFinished()
+        XCTAssertEqual(controller.progress, 1)
+        XCTAssertNotNil(controller.result(for: nextSource))
+    }
+
+    @MainActor
+    func testFailedProgressResetsBeforeARetry() async throws {
+        let source = sourceMesh()
+        let gate = ProgressFilterWorkerGate()
+        let controller = ScanFilterController(progressProcessor: { mesh, settings, progress in
+            try await gate.process(mesh, settings: settings, progress: progress)
+        })
+        let partial = expectation(description: "Work before failure")
+        let subscription = controller.$progress.sink { value in
+            if value == 0.6 { partial.fulfill() }
+        }
+        defer { subscription.cancel() }
+        controller.start(source)
+        await gate.waitForRequest(source.renderIdentity)
+        await gate.report(source.renderIdentity, value: 0.6)
+        await fulfillment(of: [partial], timeout: 2)
+        await gate.fail(source.renderIdentity)
+        await controller.waitUntilFinished()
+        XCTAssertEqual(controller.progress, 0)
+        XCTAssertFalse(controller.isFiltering)
+        XCTAssertNotNil(controller.errorMessage)
+
+        controller.start(source)
+        XCTAssertEqual(controller.progress, 0)
+        XCTAssertNil(controller.errorMessage)
+        await gate.waitForRequest(source.renderIdentity)
+        await gate.succeed(source.renderIdentity, with: filteredResult(from: source))
+        await controller.waitUntilFinished()
+        XCTAssertEqual(controller.progress, 1)
     }
 
     @MainActor
@@ -271,6 +390,36 @@ final class ScanFilterControllerTests: XCTestCase {
             medianDisplacementMM: 0.1, p95DisplacementMM: 1, maximumDisplacementMM: 1,
             observedGridCells: 3, elapsedSeconds: 0.01)
         return ScanFilterResult(mesh: mesh, statistics: statistics)
+    }
+}
+
+private actor ProgressFilterWorkerGate {
+    private var pending: [UUID: CheckedContinuation<ScanFilterResult, Error>] = [:]
+    private var progressHandlers: [UUID: ScanFilterController.ProgressHandler] = [:]
+    private var requestWaiters: [UUID: [CheckedContinuation<Void, Never>]] = [:]
+
+    func process(_ mesh: ScanMesh, settings: ScanFilterSettings,
+                 progress: @escaping ScanFilterController.ProgressHandler) async throws -> ScanFilterResult {
+        try await withCheckedThrowingContinuation { continuation in
+            progressHandlers[mesh.renderIdentity] = progress
+            pending[mesh.renderIdentity] = continuation
+            requestWaiters.removeValue(forKey: mesh.renderIdentity)?.forEach { $0.resume() }
+        }
+    }
+
+    func waitForRequest(_ identity: UUID) async {
+        guard pending[identity] == nil else { return }
+        await withCheckedContinuation { requestWaiters[identity, default: []].append($0) }
+    }
+
+    func report(_ identity: UUID, value: Double) { progressHandlers[identity]?(value) }
+
+    func succeed(_ identity: UUID, with result: ScanFilterResult) {
+        pending.removeValue(forKey: identity)!.resume(returning: result)
+    }
+
+    func fail(_ identity: UUID) {
+        pending.removeValue(forKey: identity)!.resume(throwing: NSError(domain: "ProgressFilterTests", code: 1))
     }
 }
 

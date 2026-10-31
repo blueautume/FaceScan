@@ -23,6 +23,37 @@ final class ScanFilterSettingsTests: XCTestCase {
         XCTAssertEqual(settings.configuration.maximumRadialDisplacement, 0.015)
     }
 
+    func testStandardPresetMatchesRequestedMedianAndSmoothingProfile() throws {
+        let settings = ScanFilterSettings.standard
+        XCTAssertTrue(settings.isValid)
+        XCTAssertEqual(settings.sorNeighbors, 20)
+        XCTAssertEqual(settings.sorStandardDeviations, 3.5)
+        XCTAssertEqual(settings.parameterGridSize, 0.00075)
+        XCTAssertEqual(settings.medianWindow, 3)
+        XCTAssertEqual(settings.minimumMedianObservations, 1)
+        XCTAssertEqual(settings.bilateralIterations, 1)
+        XCTAssertEqual(settings.bilateralHalfWindow, 2)
+        XCTAssertEqual(settings.bilateralSpatialSigma, 0.0015)
+        XCTAssertEqual(settings.bilateralRadiusSigma, 0.002)
+        XCTAssertEqual(settings.maximumRadialDisplacement, 0.015)
+        XCTAssertFalse(settings.filterColors)
+        let curve = try XCTUnwrap(settings.smoothingCurve)
+        XCTAssertEqual(curve.strengths, [1, 1, 1, 0.85, 0.48])
+        XCTAssertEqual(curve.maximumVariation, 0.0035)
+        XCTAssertEqual(curve.neighborhoodRadius, 0.004)
+        XCTAssertEqual(curve.strength(for: 0.00175), 1)
+        XCTAssertEqual(curve.strength(for: 0.0035), 0.48)
+
+        var unchangedBase = settings
+        unchangedBase.medianWindow = ScanFilterSettings.gentle.medianWindow
+        unchangedBase.smoothingCurve = nil
+        XCTAssertEqual(unchangedBase, .gentle, "All undisplayed parameters retain the detail-preserving base.")
+        var expectedConfiguration = ScanFilterSettings.gentle.configuration
+        expectedConfiguration.medianWindow = 3
+        expectedConfiguration.smoothingCurve = curve
+        assertConfiguration(settings.configuration, equals: expectedConfiguration)
+    }
+
     func testCustomParametersRemainInMetersThroughConfigurationAndPersistence() throws {
         let suiteName = "FaceScan-filter-settings-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
@@ -47,21 +78,83 @@ final class ScanFilterSettingsTests: XCTestCase {
         assertConfiguration(restored.configuration, equals: settings.configuration)
     }
 
-    func testMissingMalformedAndInvalidSavedSettingsFallBackToGentle() throws {
+    func testMissingMalformedAndInvalidSavedSettingsFallBackToStandard() throws {
         let suiteName = "FaceScan-filter-settings-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
-        XCTAssertEqual(ScanFilterSettings.load(from: defaults), .gentle)
+        XCTAssertEqual(ScanFilterSettings.load(from: defaults), .standard)
         defaults.set(Data("broken JSON".utf8), forKey: ScanFilterSettings.storageKey)
-        XCTAssertEqual(ScanFilterSettings.load(from: defaults), .gentle)
+        XCTAssertEqual(ScanFilterSettings.load(from: defaults), .standard)
         var invalid = ScanFilterSettings.reference
         invalid.medianWindow = 2
         defaults.set(try JSONEncoder().encode(invalid), forKey: ScanFilterSettings.storageKey)
-        XCTAssertEqual(ScanFilterSettings.load(from: defaults), .gentle)
+        XCTAssertEqual(ScanFilterSettings.load(from: defaults), .standard)
         invalid = .reference
         invalid.parameterGridSize = -1
         defaults.set(try JSONEncoder().encode(invalid), forKey: ScanFilterSettings.storageKey)
-        XCTAssertEqual(ScanFilterSettings.load(from: defaults), .gentle)
+        XCTAssertEqual(ScanFilterSettings.load(from: defaults), .standard)
+    }
+
+    func testLegacyGentleDefaultUpgradesOnceWithoutDeletingLegacyBytes() throws {
+        let suiteName = "FaceScan-filter-settings-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let legacyData = try JSONEncoder().encode(ScanFilterSettings.gentle)
+        defaults.set(legacyData, forKey: ScanFilterSettings.legacyStorageKey)
+
+        XCTAssertEqual(ScanFilterSettings.load(from: defaults), .standard)
+        XCTAssertEqual(defaults.data(forKey: ScanFilterSettings.legacyStorageKey), legacyData)
+        let upgraded = try JSONDecoder().decode(ScanFilterSettings.self,
+                                               from: XCTUnwrap(defaults.data(forKey: ScanFilterSettings.storageKey)))
+        XCTAssertEqual(upgraded, .standard)
+
+        var custom = ScanFilterSettings.standard
+        custom.smoothingCurve?.strengths[4] = 0.37
+        custom.medianWindow = 5
+        custom.save(to: defaults)
+        XCTAssertEqual(ScanFilterSettings.load(from: defaults), custom,
+                       "Later launches must retain changes made after the one-time migration.")
+    }
+
+    func testIntentionalLegacyReferenceSelectionRemainsReference() throws {
+        let suiteName = "FaceScan-filter-settings-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(try JSONEncoder().encode(ScanFilterSettings.reference),
+                     forKey: ScanFilterSettings.legacyStorageKey)
+
+        XCTAssertEqual(ScanFilterSettings.load(from: defaults), .reference)
+        XCTAssertNotNil(defaults.data(forKey: ScanFilterSettings.storageKey))
+    }
+
+    func testInvalidLegacySettingsUseStandardAndDamagedCurrentSettingsDoNotReviveLegacy() throws {
+        let suiteName = "FaceScan-filter-settings-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        var invalid = ScanFilterSettings.gentle
+        invalid.medianWindow = 2
+        defaults.set(try JSONEncoder().encode(invalid), forKey: ScanFilterSettings.legacyStorageKey)
+        XCTAssertEqual(ScanFilterSettings.load(from: defaults), .standard)
+
+        defaults.set(try JSONEncoder().encode(ScanFilterSettings.reference),
+                     forKey: ScanFilterSettings.legacyStorageKey)
+        defaults.set(Data("broken JSON".utf8), forKey: ScanFilterSettings.storageKey)
+        XCTAssertEqual(ScanFilterSettings.load(from: defaults), .standard,
+                       "An older profile must not reappear when newer preferences are damaged.")
+        defaults.set(true, forKey: ScanFilterSettings.storageKey)
+        XCTAssertEqual(ScanFilterSettings.load(from: defaults), .standard)
+    }
+
+    func testCurrentSettingsAreNotReplacedByLegacyDefaultMigration() throws {
+        let suiteName = "FaceScan-filter-settings-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(try JSONEncoder().encode(ScanFilterSettings.reference),
+                     forKey: ScanFilterSettings.legacyStorageKey)
+        ScanFilterSettings.gentle.save(to: defaults)
+
+        XCTAssertEqual(ScanFilterSettings.load(from: defaults), .gentle,
+                       "The old preset remains a valid explicit selection in the new format.")
     }
 
     func testInvalidDraftDoesNotOverwriteSavedSettingsAndValidationHandlesExtremeIntegers() throws {
@@ -97,13 +190,17 @@ final class ScanFilterSettingsTests: XCTestCase {
         var legacy = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(encoded)) as? [String: Any])
         XCTAssertNotNil(legacy.removeValue(forKey: "smoothingCurve"))
         let data = try JSONSerialization.data(withJSONObject: legacy)
-        defaults.set(data, forKey: ScanFilterSettings.storageKey)
+        defaults.set(data, forKey: ScanFilterSettings.legacyStorageKey)
 
         let decoded = try JSONDecoder().decode(ScanFilterSettings.self, from: data)
         XCTAssertEqual(decoded, expected)
         XCTAssertNil(decoded.smoothingCurve, "Existing saved settings must keep curve filtering disabled.")
         XCTAssertEqual(ScanFilterSettings.load(from: defaults), expected,
                        "Migration must not silently replace custom parameters with a preset.")
+        XCTAssertEqual(defaults.data(forKey: ScanFilterSettings.legacyStorageKey), data)
+        let migrated = try JSONDecoder().decode(ScanFilterSettings.self,
+                                               from: XCTUnwrap(defaults.data(forKey: ScanFilterSettings.storageKey)))
+        XCTAssertEqual(migrated, expected)
     }
 
     func testCurveParametersPersistAndMapWithoutChangingUnits() throws {
@@ -142,7 +239,7 @@ final class ScanFilterSettingsTests: XCTestCase {
         XCTAssertEqual(ScanFilterSettings.load(from: defaults), saved)
 
         defaults.set(try JSONEncoder().encode(invalid), forKey: ScanFilterSettings.storageKey)
-        XCTAssertEqual(ScanFilterSettings.load(from: defaults), .gentle)
+        XCTAssertEqual(ScanFilterSettings.load(from: defaults), .standard)
         invalid = saved
         invalid.smoothingCurve?.maximumVariation = 0
         XCTAssertFalse(invalid.isValid)

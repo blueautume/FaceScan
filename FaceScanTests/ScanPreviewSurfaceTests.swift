@@ -24,6 +24,10 @@ final class ScanPreviewSurfaceTests: XCTestCase {
             .overlay {
                 RoundedRectangle(cornerRadius: 28).stroke(.white.opacity(0.07))
                     .allowsHitTesting(false)
+            }
+            .overlay(alignment: .bottomTrailing) {
+                ScanResultComparisonButton(isFiltered: false, onToggle: {})
+                    .padding(16)
             })
         let window = existingWindows.first?.windowScene.map(UIWindow.init(windowScene:))
             ?? UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 700))

@@ -99,11 +99,40 @@ public enum FaceCloudProcessingError: Error, Sendable, LocalizedError {
     }
 }
 
+/// Bounds callback traffic even for large scans. All mutable state is protected
+/// by the lock; callers may safely forward the callback across worker tasks.
+/// This only throttles completed-work reports and never advances by a timer.
+final class FPCProgressReporter: @unchecked Sendable {
+    private let handler: @Sendable (Double) -> Void
+    private let lock = NSLock()
+    private var lastValue = -1.0
+    private var lastTime = -Double.infinity
+
+    nonisolated init(_ handler: @escaping @Sendable (Double) -> Void) { self.handler = handler }
+
+    nonisolated func report(_ fraction: Double, force: Bool = false) {
+        guard fraction.isFinite else { return }
+        let value = min(1, max(0, fraction))
+        let now = ProcessInfo.processInfo.systemUptime
+        lock.lock()
+        guard value > lastValue,
+              force || value == 1 || (value - lastValue >= 0.002 && now - lastTime >= 0.04) else {
+            lock.unlock()
+            return
+        }
+        lastValue = value
+        lastTime = now
+        lock.unlock()
+        handler(value)
+    }
+}
+
 public enum FacePointCloudProcessor: Sendable {
     /// 同步 CPU 实现。调用方负责放到后台；闭包也在处理线程上执行。
     nonisolated public static func process(
         _ input: [FaceCloudPoint],
         configuration p: FaceCloudConfiguration = .reference,
+        onProgress: @escaping @Sendable (Double) -> Void = { _ in },
         isCancelled: @escaping @Sendable () -> Bool = { false }
     ) throws -> FaceCloudResult {
         let start = Date.timeIntervalSinceReferenceDate
@@ -115,9 +144,30 @@ public enum FacePointCloudProcessor: Sendable {
             if isCancelled() { throw CancellationError() }
         }
         try check()
+        // Fractions describe completed work within actual algorithm stages,
+        // rather than elapsed time. Disabled passes contribute no work units.
+        let weights: [Double] = [2, 4, 35, 8,
+            p.smoothingCurve != nil && p.smoothingCurve?.uniformStrength == nil ? 16 : 0,
+            p.medianWindow > 1 ? 8 : 1, Double(p.bilateralIterations) * 6,
+            8, p.filterColors ? 12 : 0, 10, 1]
+        let totalWeight = weights.reduce(0, +)
+        var completedWeight = 0.0
+        let stages = weights.map { weight -> (lower: Double, span: Double) in
+            defer { completedWeight += weight }
+            return (completedWeight / totalWeight, weight / totalWeight)
+        }
+        let progress = FPCProgressReporter(onProgress)
+        func report(_ stage: Int, _ fraction: Double, force: Bool = false) {
+            progress.report(stages[stage].lower + stages[stage].span * fraction, force: force)
+        }
+        progress.report(0, force: true)
         var positions = [SIMD3<Double>]()
         positions.reserveCapacity(input.count)
         for (i, point) in input.enumerated() {
+            if i & 1023 == 0 {
+                try check()
+                report(0, Double(i) / Double(input.count))
+            }
             let a = point.position
             guard a.x.isFinite, a.y.isFinite, a.z.isFinite,
                   abs(a.x) < 1000, abs(a.y) < 1000, abs(a.z) < 1000 else {
@@ -125,14 +175,18 @@ public enum FacePointCloudProcessor: Sendable {
             }
             positions.append(SIMD3(Double(a.x), Double(a.y), Double(a.z)))
         }
-        let distances = try FPCExactKDTree(points: positions).meanNeighborDistances(
-            k: p.sorNeighbors, checkCancellation: check)
+        report(0, 1, force: true)
+        let tree = FPCExactKDTree(points: positions, onProgress: { report(1, $0) })
+        report(1, 1, force: true)
+        let distances = try tree.meanNeighborDistances(
+            k: p.sorNeighbors, onProgress: { report(2, $0) }, checkCancellation: check)
         let mean = distances.reduce(0, +) / Double(distances.count)
         let variance = distances.reduce(0) { $0 + ($1 - mean) * ($1 - mean) } / Double(distances.count)
         let sorThreshold = mean + p.sorStandardDeviations * sqrt(variance)
         let inliers = distances.indices.filter { distances[$0] <= sorThreshold }
         guard !inliers.isEmpty else { throw FaceCloudProcessingError.noSupportedPoints }
         try check()
+        report(2, 1, force: true)
 
         // Chart: u = referenceRadius * atan2(x - cx, z - cz), v = y.
         let ntDouble = ceil(2 * Double.pi * p.referenceRadius / p.parameterGridSize)
@@ -144,7 +198,11 @@ public enum FacePointCloudProcessor: Sendable {
         var theta = [Double](), radius = [Double](), absoluteY = [Int]()
         theta.reserveCapacity(inliers.count); radius.reserveCapacity(inliers.count)
         absoluteY.reserveCapacity(inliers.count)
-        for i in inliers {
+        for (ordinal, i) in inliers.enumerated() {
+            if ordinal & 1023 == 0 {
+                try check()
+                report(3, 0.15 * Double(ordinal) / Double(inliers.count))
+            }
             let a = positions[i]
             theta.append(atan2(a.x - p.cylinderCenterX, a.z - p.cylinderCenterZ))
             radius.append(hypot(a.x - p.cylinderCenterX, a.z - p.cylinderCenterZ))
@@ -160,25 +218,46 @@ public enum FacePointCloudProcessor: Sendable {
         var binIDs = [Int](repeating: 0, count: inliers.count)
         var counts = [Int](repeating: 0, count: cells)
         for i in inliers.indices {
+            if i & 1023 == 0 {
+                try check()
+                report(3, 0.15 + 0.15 * Double(i) / Double(inliers.count))
+            }
             let u = FPCGrid.wrap(Int(floor((theta[i] + .pi) / (2 * .pi) * Double(nt))), nt)
             let id = u * nv + absoluteY[i] - y0
             binIDs[i] = id; counts[id] += 1
         }
         // Packed bins avoid one heap allocation per cell.
         var offsets = [Int](repeating: 0, count: cells + 1)
-        for c in 0..<cells { offsets[c + 1] = offsets[c] + counts[c] }
+        for c in 0..<cells {
+            if c & 4095 == 0 {
+                try check()
+                report(3, 0.3 + 0.2 * Double(c) / Double(cells))
+            }
+            offsets[c + 1] = offsets[c] + counts[c]
+        }
         var cursor = offsets
         var members = [Int](repeating: 0, count: inliers.count)
-        for i in inliers.indices { let c = binIDs[i]; members[cursor[c]] = i; cursor[c] += 1 }
+        for i in inliers.indices {
+            if i & 1023 == 0 {
+                try check()
+                report(3, 0.5 + 0.15 * Double(i) / Double(inliers.count))
+            }
+            let c = binIDs[i]; members[cursor[c]] = i; cursor[c] += 1
+        }
         let active = counts.indices.filter { counts[$0] > 0 }
         var observed = [Bool](repeating: false, count: cells)
         var rGrid = [Double](repeating: 0, count: cells)
         var scratch = [Double](); scratch.reserveCapacity(max(25, counts.max() ?? 0))
-        for c in active {
+        for (ordinal, c) in active.enumerated() {
+            if ordinal & 1023 == 0 {
+                try check()
+                report(3, 0.65 + 0.35 * Double(ordinal) / Double(active.count))
+            }
             observed[c] = true; scratch.removeAll(keepingCapacity: true)
             for j in offsets[c]..<offsets[c + 1] { scratch.append(radius[members[j]]) }
             rGrid[c] = FPCGrid.median(&scratch)
         }
+        report(3, 1, force: true)
 
         // Measure the original observations before any spatial smoothing. A
         // fitted local tilt is removed so a sloping cheek is not a feature.
@@ -186,14 +265,19 @@ public enum FacePointCloudProcessor: Sendable {
         if let curve = p.smoothingCurve, curve.uniformStrength == nil {
             variation = try FPCAdaptiveSmoothing.localVariation(
                 radii: rGrid, observed: observed, active: active, nu: nt, nv: nv,
-                du: du, dv: dy, radius: curve.neighborhoodRadius, checkCancellation: check)
+                du: du, dv: dy, radius: curve.neighborhoodRadius,
+                onProgress: { report(4, $0) }, checkCancellation: check)
         } else { variation = nil }
+        report(4, 1, force: true)
 
         // Masked median: only actual observed bins contribute.
         var surface = rGrid
         let mh = p.medianWindow / 2
         for (ordinal, c) in active.enumerated() {
-            if ordinal & 1023 == 0 { try check() }
+            if ordinal & 1023 == 0 {
+                try check()
+                report(5, Double(ordinal) / Double(active.count))
+            }
             scratch.removeAll(keepingCapacity: true)
             let u = c / nv, v = c % nv
             for a in -mh...mh {
@@ -208,13 +292,18 @@ public enum FacePointCloudProcessor: Sendable {
             }
             if scratch.count >= p.minimumMedianObservations { surface[c] = FPCGrid.median(&scratch) }
         }
+        report(5, 1, force: true)
         let spatial = FPCGrid.kernel(half: p.bilateralHalfWindow, du: du, dv: dy,
                                      sigma: p.bilateralSpatialSigma)
         let radiusDenominator = 2 * p.bilateralRadiusSigma * p.bilateralRadiusSigma
-        for _ in 0..<p.bilateralIterations {
+        for iteration in 0..<p.bilateralIterations {
             var next = surface
             for (ordinal, c) in active.enumerated() {
-                if ordinal & 1023 == 0 { try check() }
+                if ordinal & 1023 == 0 {
+                    try check()
+                    report(6, (Double(iteration) + Double(ordinal) / Double(active.count))
+                        / Double(p.bilateralIterations))
+                }
                 let u = c / nv, v = c % nv
                 var numerator = 0.0, denominator = 0.0
                 for tap in spatial {
@@ -231,14 +320,20 @@ public enum FacePointCloudProcessor: Sendable {
             surface = next
         }
         try check()
+        report(6, 1, force: true)
         // Exact separable squared-Euclidean feature transform, with periodic theta.
         // Empty bins are filled only for bilinear interpolation, never as observations.
-        let nearest = FPCGrid.nearestObservedMap(observed, nu: nt, nv: nv)
+        let nearest = try FPCGrid.nearestObservedMap(observed, nu: nt, nv: nv,
+            onProgress: { report(7, $0) }, checkCancellation: check)
+        report(7, 1, force: true)
         var colorGrid = [SIMD3<Double>](repeating: .zero, count: cells)
         if p.filterColors {
             var red = [Double](), green = [Double](), blue = [Double]()
             for (ordinal, c) in active.enumerated() {
-                if ordinal & 1023 == 0 { try check() }
+                if ordinal & 1023 == 0 {
+                    try check()
+                    report(8, 0.5 * Double(ordinal) / Double(active.count))
+                }
                 red.removeAll(keepingCapacity: true); green.removeAll(keepingCapacity: true)
                 blue.removeAll(keepingCapacity: true)
                 for j in offsets[c]..<offsets[c + 1] {
@@ -261,7 +356,10 @@ public enum FacePointCloudProcessor: Sendable {
             let colorDenominator = 2 * p.colorRGBSigma * p.colorRGBSigma
             var smoothed = colorGrid
             for (ordinal, c) in active.enumerated() {
-                if ordinal & 1023 == 0 { try check() }
+                if ordinal & 1023 == 0 {
+                    try check()
+                    report(8, 0.5 + 0.5 * Double(ordinal) / Double(active.count))
+                }
                 let u = c / nv, v = c % nv
                 var sum = SIMD3<Double>.zero, norm = 0.0
                 for tap in colorKernel {
@@ -278,11 +376,15 @@ public enum FacePointCloudProcessor: Sendable {
             }
             colorGrid = smoothed
         }
+        report(8, 1, force: true)
         var output = [FaceCloudPoint](), sources = [Int](), movements = [Double]()
         output.reserveCapacity(inliers.count); sources.reserveCapacity(inliers.count)
         movements.reserveCapacity(inliers.count)
         for i in inliers.indices {
-            if i & 2047 == 0 { try check() }
+            if i & 2047 == 0 {
+                try check()
+                report(9, Double(i) / Double(inliers.count))
+            }
             let source = inliers[i], a = positions[source]
             let sample = FPCGrid.sample(theta: theta[i], y: a.y, nu: nt, nv: nv, dy: dy,
                                         y0: y0, nearest: nearest)
@@ -324,6 +426,8 @@ public enum FacePointCloudProcessor: Sendable {
             sources.append(source); movements.append(movement * 1000)
         }
         guard !output.isEmpty else { throw FaceCloudProcessingError.noSupportedPoints }
+        report(9, 1, force: true)
+        try check()
         movements.sort()
         let stats = FaceCloudStatistics(
             inputCount: input.count, outputCount: output.count,
@@ -334,17 +438,21 @@ public enum FacePointCloudProcessor: Sendable {
             p95DisplacementMM: FPCGrid.quantile(movements, 0.95),
             maximumDisplacementMM: movements.last!, observedGridCells: active.count,
             elapsedSeconds: Date.timeIntervalSinceReferenceDate - start)
+        try check()
+        progress.report(1, force: true)
         return FaceCloudResult(points: output, sourceIndices: sources, statistics: stats)
     }
 
     /// 后台单次处理。取消调用方 Task 时，会取消实际处理任务。
     /// 请在用户结束扫描时调用，保留任务句柄以支持界面取消。
     nonisolated public static func processAsync(
-        _ input: [FaceCloudPoint], configuration: FaceCloudConfiguration = .reference
+        _ input: [FaceCloudPoint], configuration: FaceCloudConfiguration = .reference,
+        onProgress: @escaping @Sendable (Double) -> Void = { _ in }
     ) async throws -> FaceCloudResult {
         try Task.checkCancellation()
         let worker = Task.detached(priority: .utility) {
-            try process(input, configuration: configuration, isCancelled: { Task.isCancelled })
+            try process(input, configuration: configuration, onProgress: onProgress,
+                        isCancelled: { Task.isCancelled })
         }
         return try await withTaskCancellationHandler(operation: {
             let result = try await worker.value
@@ -378,6 +486,7 @@ enum FPCAdaptiveSmoothing {
     nonisolated static func localVariation(
         radii: [Double], observed: [Bool], active: [Int], nu: Int, nv: Int,
         du: Double, dv: Double, radius: Double,
+        onProgress: (Double) -> Void = { _ in },
         checkCancellation: () throws -> Void = {}
     ) throws -> [Double] {
         var result = [Double](repeating: .nan, count: radii.count)
@@ -404,7 +513,10 @@ enum FPCAdaptiveSmoothing {
             }
         }
         for (ordinal, cell) in active.enumerated() {
-            if ordinal & 63 == 0 { try checkCancellation() }
+            if ordinal & 63 == 0 {
+                try checkCancellation()
+                onProgress(Double(ordinal) / Double(active.count))
+            }
             let u = cell / nv, v = cell % nv
             var count = 0.0
             var sx = 0.0, sy = 0.0, sz = 0.0
@@ -435,6 +547,7 @@ enum FPCAdaptiveSmoothing {
             result[cell] = sqrt(max(0, residual / count))
         }
         try checkCancellation()
+        onProgress(1)
         return result
     }
 }
@@ -499,12 +612,19 @@ private enum FPCGrid: Sendable {
         }
         return (distances, owners)
     }
-    nonisolated static func nearestObservedMap(_ mask: [Bool], nu: Int, nv: Int) -> [Int] {
+    nonisolated static func nearestObservedMap(
+        _ mask: [Bool], nu: Int, nv: Int,
+        onProgress: (Double) -> Void, checkCancellation: () throws -> Void
+    ) throws -> [Int] {
         let width = nu * 3
         var firstDistance = [Double](repeating: 0, count: width * nv)
         var firstOwner = [Int](repeating: 0, count: width * nv)
         var column = [Double](repeating: 0, count: width)
         for y in 0..<nv {
+            if y & 15 == 0 {
+                try checkCancellation()
+                onProgress(0.5 * Double(y) / Double(nv))
+            }
             for u in 0..<width { column[u] = mask[(u % nu) * nv + y] ? 0 : .infinity }
             let t = transform(column)
             for u in 0..<width {
@@ -516,10 +636,16 @@ private enum FPCGrid: Sendable {
         var row = [Double](repeating: 0, count: nv)
         // Only central tile results are needed after the second pass.
         for u in nu..<(2*nu) {
+            if (u - nu) & 15 == 0 {
+                try checkCancellation()
+                onProgress(0.5 + 0.5 * Double(u - nu) / Double(nu))
+            }
             for y in 0..<nv { row[y] = firstDistance[u*nv+y] }
             let t = transform(row)
             for y in 0..<nv { map[(u-nu)*nv+y] = firstOwner[u*nv+t.owner[y]] }
         }
+        try checkCancellation()
+        onProgress(1)
         return map
     }
 }
@@ -534,11 +660,14 @@ internal struct FPCExactKDTree: Sendable {
     /// A balanced tree stored implicitly: the midpoint of each range is its root.
     private let order: [Int]
 
-    nonisolated internal init(points: [SIMD3<Double>]) {
+    nonisolated internal init(points: [SIMD3<Double>], onProgress: (Double) -> Void = { _ in }) {
         self.points = points
         var indices = Array(points.indices)
-        Self.build(&indices, points: points, lower: 0, upper: indices.count, axis: 0)
+        var completed = 0
+        Self.build(&indices, points: points, lower: 0, upper: indices.count, axis: 0,
+                   completed: &completed, onProgress: onProgress)
         self.order = indices
+        onProgress(1)
     }
 
     /// Mean Euclidean distance to k other samples, in the input coordinate units.
@@ -546,6 +675,7 @@ internal struct FPCExactKDTree: Sendable {
     /// Cancellation is checked every 256 queries, including before the first one.
     nonisolated internal func meanNeighborDistances(
         k: Int,
+        onProgress: (Double) -> Void = { _ in },
         checkCancellation: () throws -> Void = {}
     ) throws -> [Double] {
         try checkCancellation()
@@ -556,7 +686,10 @@ internal struct FPCExactKDTree: Sendable {
         // Reuse one fixed-size max heap for all queries; no allocation per point.
         var heap = Array(repeating: 0.0, count: neighbourCount)
         for index in points.indices {
-            if index & 255 == 0 { try checkCancellation() }
+            if index & 255 == 0 {
+                try checkCancellation()
+                onProgress(Double(index) / Double(count))
+            }
             var used = 0
             search(lower: 0, upper: order.count, axis: 0,
                    query: points[index], excluding: index,
@@ -565,20 +698,32 @@ internal struct FPCExactKDTree: Sendable {
             for slot in 0..<used { sum += heap[slot].squareRoot() }
             result[index] = sum / Double(used)
         }
+        onProgress(1)
         return result
     }
 
     nonisolated private static func build(
         _ indices: inout [Int], points: [SIMD3<Double>],
-        lower: Int, upper: Int, axis: Int
+        lower: Int, upper: Int, axis: Int,
+        completed: inout Int, onProgress: (Double) -> Void
     ) {
-        guard upper - lower > 1 else { return }
+        guard upper - lower > 1 else {
+            completed += max(0, upper - lower)
+            if completed & 255 == 0, !points.isEmpty {
+                onProgress(Double(completed) / Double(points.count))
+            }
+            return
+        }
         let middle = lower + (upper - lower) / 2
         select(&indices, points: points, lower: lower, upper: upper,
                target: middle, axis: axis)
+        completed += 1
+        if completed & 255 == 0 { onProgress(Double(completed) / Double(points.count)) }
         let nextAxis = (axis + 1) % 3
-        build(&indices, points: points, lower: lower, upper: middle, axis: nextAxis)
-        build(&indices, points: points, lower: middle + 1, upper: upper, axis: nextAxis)
+        build(&indices, points: points, lower: lower, upper: middle, axis: nextAxis,
+              completed: &completed, onProgress: onProgress)
+        build(&indices, points: points, lower: middle + 1, upper: upper, axis: nextAxis,
+              completed: &completed, onProgress: onProgress)
     }
 
     /// Coordinate plus source-index ordering makes duplicate coordinates deterministic.

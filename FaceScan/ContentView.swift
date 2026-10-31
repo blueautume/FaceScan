@@ -6,7 +6,6 @@ struct ContentView: View {
     @StateObject private var scanner: FaceScanController
     @StateObject private var history: ScanHistoryStore
     @StateObject private var scanFilter = ScanFilterController()
-    @StateObject private var scanEnhancement = ScanEnhancementController()
     @Environment(\.scenePhase) private var scenePhase
     @State private var showsPrivacy = false
     @State private var exporting = false
@@ -34,15 +33,9 @@ struct ContentView: View {
     @State private var sampleMesh: ScanMesh?
     @State private var syntheticSnapshot: LivePointCloudSnapshot?
     @State private var showsLiveSample = false
-    @State private var resultStyle: MeshDisplayStyle = .points
+    @State private var resultPointSizeScale = 1.0
     @State private var filterSettings = ScanFilterSettings.load()
     @State private var showsFilterSettings = false
-    @State private var enhancementSettings = ScanEnhancementSettings.load()
-    @State private var appliedEnhancementSettings: ScanEnhancementSettings?
-    @State private var displayPreferences = ScanDisplayPreferences.load()
-    @State private var showsPresentationSettings = false
-    @State private var isEnhancementEnabled = false
-    @State private var showsFilterStatistics = false
     #if DEBUG
     @State private var hasSeededHistoryPreview = false
     #endif
@@ -60,26 +53,8 @@ struct ContentView: View {
     private var originalMesh: ScanMesh? { historicalMesh ?? sampleMesh ?? scanner.result }
     private var mesh: ScanMesh? { originalMesh.map { scanFilter.displayedMesh(for: $0) } }
     private var filteredResult: ScanFilterResult? { originalMesh.flatMap { scanFilter.result(for: $0) } }
-    private var enhancedPresentation: ScanEnhancementController.Presentation? {
-        mesh.flatMap { scanEnhancement.result(for: $0) }
-    }
-    private var presentationMesh: ScanMesh? {
-        mesh.map { scanEnhancement.displayedMesh(for: $0, isEnabled: isEnhancementEnabled) }
-    }
-    private var showsEnhancedPoints: Bool { isEnhancementEnabled && enhancedPresentation != nil }
-    private var usesLivePointSize: Bool { historicalMesh == nil && (isScanning || showsLiveSample) }
     private var activePointSizeScale: Double {
-        usesLivePointSize ? displayPreferences.livePointSizeScale : displayPreferences.resultPointSizeScale
-    }
-    private var pointSizeBinding: Binding<Double> {
-        Binding(get: { activePointSizeScale }, set: { scale in
-            if usesLivePointSize { displayPreferences.livePointSizeScale = scale }
-            else { displayPreferences.resultPointSizeScale = scale }
-        })
-    }
-    private var filterPresetLabel: String {
-        if filterSettings.smoothingCurve != nil { return "自定义 · 曲线" }
-        return filterSettings == .gentle ? "轻度" : (filterSettings == .reference ? "参考参数" : "自定义")
+        mesh == nil || showsLiveSample ? 1 : resultPointSizeScale
     }
     private var isScanning: Bool { scanner.phase == .scanning || scanner.phase == .processing }
     private var showsPoints: Bool { isScanning || mesh != nil || showsLiveSample }
@@ -110,13 +85,19 @@ struct ContentView: View {
                         .frame(width: 44, height: 44)
                         .foregroundStyle(ScanTheme.secondary)
                 }
+                .overlay(alignment: .topTrailing) {
+                    if history.hasFailedSaves {
+                        Circle().fill(ScanTheme.destructive).frame(width: 7, height: 7)
+                            .padding(7)
+                            .allowsHitTesting(false)
+                    }
+                }
                 .disabled(exporting || openingFile)
                 .accessibilityLabel("扫描历史")
                 .accessibilityIdentifier("history.open")
                 Button {
                     wantsToScan = false
                     scanFilter.cancel()
-                    scanEnhancement.cancel()
                     scanner.suspendCaptureForFileViewing()
                     pickerGeneration = UUID()
                     choosingFile = true
@@ -142,13 +123,6 @@ struct ContentView: View {
             stage
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .layoutPriority(1)
-
-            if showsPoints, importedDocument == nil, !openingFile {
-                ScanPointSizeControl(title: usesLivePointSize ? "扫描点大小" : "结果点大小",
-                                     scale: pointSizeBinding, compact: true)
-                    .disabled(!usesLivePointSize && resultStyle == .color
-                              && !(presentationMesh?.triangleIndices.isEmpty ?? true))
-            }
 
             controls
         }
@@ -208,18 +182,8 @@ struct ContentView: View {
         }
         .onChange(of: scanFilter.showsFiltered) { _, _ in savedNotice = false }
         .onChange(of: scanFilter.result?.mesh.renderIdentity) { _, _ in savedNotice = false }
-        .onChange(of: scanFilter.isFiltering) { _, filtering in
-            if filtering { scanEnhancement.cancel() }
-            else { refreshEnhancementForSelectedSource() }
-        }
+        .onChange(of: originalMesh?.renderIdentity) { _, _ in resultPointSizeScale = 1 }
         .onChange(of: filterSettings) { _, settings in settings.save() }
-        .onChange(of: enhancementSettings) { _, settings in settings.save() }
-        .onChange(of: displayPreferences) { _, preferences in preferences.save() }
-        .onChange(of: mesh?.renderIdentity) { _, _ in refreshEnhancementForSelectedSource() }
-        .onChange(of: isEnhancementEnabled) { _, enabled in
-            if enabled { applyEnhancement() }
-            else { scanEnhancement.cancel() }
-        }
         .onChange(of: showsHistory) { _, presented in
             if !presented, !openingFile { restoreCapture() }
         }
@@ -266,14 +230,6 @@ struct ContentView: View {
                 applyFilter()
             }
         }
-        .sheet(isPresented: $showsPresentationSettings) {
-            ScanPresentationSettingsView(settings: $enhancementSettings,
-                                         isEnabled: $isEnhancementEnabled,
-                                         pointSizeScale: $displayPreferences.resultPointSizeScale) {
-                showsPresentationSettings = false
-                applyEnhancement()
-            }
-        }
         .sheet(isPresented: $showsHistory) {
             ScanHistoryView(history: history, onOpen: openHistory)
         }
@@ -288,19 +244,21 @@ struct ContentView: View {
             get: { activeErrorMessage != nil },
             set: { if !$0 { clearErrors() } }
         )) {
+            if activeErrorTitle == "历史记录", history.hasFailedSaves {
+                Button("重试保存") { history.retryFailedSaves(); clearErrors() }
+            }
             Button("好", role: .cancel) { clearErrors() }
         } message: { Text(activeErrorMessage ?? "请重试。") }
     }
 
     private var activeErrorTitle: String {
-        if scanEnhancement.errorMessage != nil { return "无法增强显示" }
         if scanFilter.errorMessage != nil { return "无法滤波" }
         if exportError == nil, history.errorMessage != nil, !showsHistory { return "历史记录" }
         return errorTitle
     }
 
     private var activeErrorMessage: String? {
-        scanEnhancement.errorMessage ?? scanFilter.errorMessage ?? exportError
+        scanFilter.errorMessage ?? exportError
             ?? (showsHistory ? nil : history.errorMessage)
     }
 
@@ -315,12 +273,11 @@ struct ContentView: View {
                     && !showsLiveSample && scanner.phase != .unavailable,
                 poseStore: scanner.livePose,
                 followsFacePose: scanner.phase == .scanning,
-                surfaceMesh: presentationMesh,
+                surfaceMesh: mesh,
                 resultFramingIdentity: originalMesh?.renderIdentity,
-                displayStyle: mesh == nil ? .points : resultStyle,
+                displayStyle: .points,
                 animatesAcquisition: scanner.phase == .scanning || showsLiveSample,
-                pointSizeScale: activePointSizeScale,
-                isDisplayEnhanced: showsEnhancedPoints)
+                pointSizeScale: activePointSizeScale)
                 .opacity(importedDocument == nil && !openingFile ? 1 : 0)
                 .allowsHitTesting(importedDocument == nil && !openingFile)
                 .accessibilityHidden(importedDocument != nil || openingFile)
@@ -368,7 +325,7 @@ struct ContentView: View {
                     Spacer()
                 }
                 Spacer()
-                if !openingFile, !isScanning, !showsLiveSample,
+                if !openingFile, mesh == nil, !isScanning, !showsLiveSample,
                    privacy.isAccepted || importedDocument != nil {
                     Text(stageHint)
                         .font(.system(size: 12, weight: .medium))
@@ -381,12 +338,22 @@ struct ContentView: View {
             }
             .padding(18)
             .allowsHitTesting(false)
+
         }
         .clipShape(RoundedRectangle(cornerRadius: 28))
         .overlay {
             RoundedRectangle(cornerRadius: 28)
                 .stroke(usesCaptureCanvas ? ScanTheme.canvasTrack : ScanTheme.border.opacity(0.7))
                 .allowsHitTesting(false)
+        }
+        .overlay(alignment: .bottomTrailing) {
+            if filteredResult != nil, importedDocument == nil, !openingFile, !showsHistory {
+                ScanResultComparisonButton(isFiltered: mesh?.isFiltered == true) {
+                    scanFilter.showsFiltered.toggle()
+                }
+                .disabled(exporting)
+                .padding(16)
+            }
         }
         .accessibilityHidden(showsPrivacy)
     }
@@ -396,22 +363,13 @@ struct ContentView: View {
         if let importedDocument {
             return importedDocument.mesh.isSample ? "合成示例 · PLY 点云" : "PLY 点云"
         }
-        let prefix = historicalEntry == nil ? "" : "历史 · "
-        if originalMesh?.isSample == true || showsLiveSample {
-            let source = mesh?.isFiltered == true ? "合成示例 · 滤波后 · 非真实扫描" : "合成示例 · 非真实扫描"
-            return prefix + source + (showsEnhancedPoints ? " · 显示增强" : "")
-        }
-        if showsEnhancedPoints { return prefix + (mesh?.isFiltered == true ? "滤波后 · 显示增强" : "原始扫描 · 显示增强") }
-        if mesh?.isFiltered == true { return prefix + "滤波后 · 观感预览" }
-        if filteredResult != nil || historicalEntry != nil { return prefix + "原始扫描" }
-        if mesh != nil { return "扫描完成" }
+        if originalMesh?.isSample == true || showsLiveSample { return "合成示例 · 非真实扫描" }
         if isScanning { return "实时点云" }
         return ""
     }
 
     private var stageHint: String {
         if importedDocument != nil { return "拖动旋转 · 双指缩放 · 双击重置" }
-        if mesh != nil { return savedNotice ? "已导出" : "拖动旋转 · 双指缩放 · 双击重置" }
         if !hasEnteredCapture { return "点按开始扫描，或打开 PLY 文件" }
         if showsLiveSample { return "合成点云演示" }
         if scanner.phase == .ready, scanner.errorMessage == nil { return "正对镜头 · 距离约 30–50 厘米" }
@@ -428,112 +386,58 @@ struct ContentView: View {
             primaryButton("查看隐私协议", symbol: "hand.raised") { showsPrivacy = true }
         } else if let mesh {
             VStack(spacing: 10) {
-                Picker("", selection: $resultStyle) {
-                    Text("点云").tag(MeshDisplayStyle.points)
-                    Text("原色").tag(MeshDisplayStyle.color)
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .accessibilityLabel("显示方式")
+                ScanPointSizeControl(title: "点大小", scale: $resultPointSizeScale)
+                    .frame(minHeight: 38)
 
-                HStack {
-                    Button {
-                        showsFilterSettings = true
-                    } label: {
+                Button {
+                    showsFilterSettings = true
+                } label: {
+                    HStack(spacing: 8) {
                         Label("滤波参数", systemImage: "slider.horizontal.3")
-                    }
-                    .disabled(exporting || scanFilter.isFiltering)
-                    .accessibilityValue(filterPresetLabel)
-                    Spacer()
-                    Button {
-                        showsPresentationSettings = true
-                    } label: {
-                        Label("呈现增强", systemImage: "sparkles")
-                    }
-                    .disabled(exporting || scanFilter.isFiltering)
-                    if isEnhancementEnabled || enhancedPresentation != nil {
-                        Toggle("显示增强点云", isOn: $isEnhancementEnabled)
-                            .labelsHidden()
-                            .fixedSize()
-                            .tint(ScanTheme.tint)
-                            .accessibilityLabel("显示增强点云")
-                    }
-                }
-                .font(.system(size: 13, weight: .medium))
-                .frame(minHeight: 28)
-
-                if let enhancedPresentation, isEnhancementEnabled {
-                    Text("显示 \(enhancedPresentation.mesh.vertexCount) 点 · 插值 +\(enhancedPresentation.statistics.addedPointCount)\(enhancedPresentation.statistics.reachedLimit ? " · 达上限" : "") · 仅查看")
-                        .font(.system(size: 11))
-                        .foregroundStyle(ScanTheme.secondary)
-                }
-
-                if let filteredResult {
-                    Picker("结果对比", selection: $scanFilter.showsFiltered) {
-                        Text("原始").tag(false)
-                        Text("滤波后").tag(true)
-                    }
-                    .pickerStyle(.segmented)
-                    .disabled(exporting)
-                    DisclosureGroup(isExpanded: $showsFilterStatistics) {
-                        Text("离群剔除 \(filteredResult.statistics.sorRejectedCount) · 位移剔除 \(filteredResult.statistics.modelRejectedCount)")
+                        Spacer(minLength: 8)
+                        Text(filterSettings.presetName)
                             .foregroundStyle(ScanTheme.secondary)
-                    } label: {
-                        Text("\(filteredResult.statistics.inputCount) → \(filteredResult.statistics.outputCount) 点 · \(filteredResult.statistics.elapsedSeconds, specifier: "%.1f") 秒")
+                        if let filteredResult, filteredResult.settings != filterSettings {
+                            Circle().fill(ScanTheme.tint).frame(width: 6, height: 6)
+                                .accessibilityHidden(true)
+                        }
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(ScanTheme.secondary)
                     }
-                        .font(.system(size: 12))
-                        .monospacedDigit()
-                        .foregroundStyle(ScanTheme.secondary)
-                    if filteredResult.settings != filterSettings {
-                        Text("参数已更改，重新滤波后生效")
-                            .font(.system(size: 12))
-                            .foregroundStyle(ScanTheme.tint)
-                    }
+                    .font(.system(size: 14, weight: .medium))
+                    .padding(.horizontal, 14)
+                    .frame(maxWidth: .infinity, minHeight: 44)
+                    .background(ScanTheme.card, in: RoundedRectangle(cornerRadius: 13))
+                    .contentShape(Rectangle())
                 }
-
-                if scanFilter.isFiltering {
-                    HStack {
-                        ProgressView("正在滤波…")
-                        Spacer()
-                        Button("取消") { scanFilter.cancel() }
-                    }
-                    .font(.system(size: 13))
-                    .foregroundStyle(ScanTheme.secondary)
-                }
-
-                if scanEnhancement.isProcessing {
-                    HStack {
-                        ProgressView("正在补点…")
-                        Spacer()
-                        Button("取消") { scanEnhancement.cancel() }
-                    }
-                    .font(.system(size: 13))
-                    .foregroundStyle(ScanTheme.secondary)
-                }
-
-                historySaveStatus
+                .buttonStyle(.plain)
+                .disabled(exporting || scanFilter.isFiltering)
+                .accessibilityIdentifier("filter.settings")
+                .accessibilityValue(filterSettings.presetName)
+                .accessibilityHint(filteredResult.map { $0.settings != filterSettings } == true
+                                   ? "参数已更改，下次滤波时应用" : "调整滤波参数")
 
                 HStack(spacing: 12) {
-                    primaryButton(filteredResult == nil ? "滤波" : "重新滤波",
-                                  symbol: "camera.filters", action: applyFilter)
-                        .disabled(exporting || scanFilter.isFiltering)
-                    primaryButton(exporting ? "正在导出…" : (mesh.isFiltered ? "导出滤波 PLY" : "导出 PLY"),
-                                  symbol: "square.and.arrow.up") {
+                    ScanFilterActionButton(isFiltering: scanFilter.isFiltering,
+                                           progress: scanFilter.progress,
+                                           onApply: applyFilter, onCancel: scanFilter.cancel)
+                        .disabled(exporting)
+                    primaryButton(exporting ? "导出中…" : (savedNotice ? "已导出" : "导出"),
+                                  symbol: savedNotice ? "checkmark" : "square.and.arrow.up") {
                         export(mesh)
                     }
-                    .disabled(exporting || scanFilter.isFiltering || scanEnhancement.isProcessing)
+                    .disabled(exporting || scanFilter.isFiltering)
+                    .accessibilityIdentifier("scan.export")
+                    .accessibilityHint(mesh.isFiltered ? "导出当前滤波点云为 PLY" : "导出当前原始点云为 PLY")
                 }
-                HStack {
-                    if historicalEntry != nil {
-                        Button("关闭历史", action: closeHistory)
-                            .frame(maxWidth: .infinity, minHeight: 38)
-                    }
-                    Button("重新扫描", action: restart)
-                        .frame(maxWidth: .infinity, minHeight: 38)
-                }
+
+                Button("重新扫描", action: restart)
                     .font(.system(size: 14, weight: .medium))
                     .foregroundStyle(ScanTheme.secondary)
+                    .frame(maxWidth: .infinity, minHeight: 44)
                     .disabled(exporting)
+                    .accessibilityIdentifier("scan.restart")
             }
         } else if showsLiveSample {
             primaryButton("结束演示", symbol: "stop.fill") { restart() }
@@ -606,12 +510,10 @@ struct ContentView: View {
     private func beginScan() {
         guard privacy.isAccepted else { showsPrivacy = true; return }
         showsFilterSettings = false
-        showsPresentationSettings = false
-        scanEnhancement.reset()
+        resultPointSizeScale = 1
         scanFilter.reset()
         historicalMesh = nil
         historicalEntry = nil
-        resultStyle = .points
         hasEnteredCapture = true
         wantsToScan = true
         scanner.allowCaptureAfterFileViewing()
@@ -627,19 +529,23 @@ struct ContentView: View {
     private func restart() {
         historicalMesh = nil
         historicalEntry = nil
-        showsPresentationSettings = false
-        scanEnhancement.reset()
         showsFilterSettings = false
+        resultPointSizeScale = 1
         scanFilter.reset()
-        resultStyle = .points
         hasEnteredCapture = true
-        wantsToScan = false
         sampleMesh = nil
         finalSnapshot = nil
         syntheticSnapshot = nil
         showsLiveSample = false
         savedNotice = false
+        wantsToScan = true
         scanner.reset()
+        if scanner.phase == .ready {
+            wantsToScan = false
+            scanner.startScan()
+        } else if scanner.phase == .unavailable {
+            wantsToScan = false
+        }
     }
 
     private func revokeConsent() {
@@ -647,13 +553,9 @@ struct ContentView: View {
         historicalMesh = nil
         historicalEntry = nil
         history.clearAll()
-        showsPresentationSettings = false
-        isEnhancementEnabled = false
-        appliedEnhancementSettings = nil
-        scanEnhancement.reset()
         showsFilterSettings = false
+        resultPointSizeScale = 1
         scanFilter.reset()
-        resultStyle = .points
         privacy.revoke()
         scanner.stop()
         cancelExport()
@@ -708,29 +610,12 @@ struct ContentView: View {
         guard privacy.isAccepted, !exporting, !openingFile, importedDocument == nil,
               let originalMesh else { return }
         savedNotice = false
-        scanEnhancement.cancel()
         scanFilter.start(originalMesh, settings: filterSettings)
-    }
-
-    private func applyEnhancement() {
-        guard privacy.isAccepted, !exporting, !openingFile, !choosingFile, importedDocument == nil,
-              !scanFilter.isFiltering, let mesh else { return }
-        resultStyle = .points
-        appliedEnhancementSettings = enhancementSettings
-        scanEnhancement.start(mesh, settings: enhancementSettings)
-    }
-
-    private func refreshEnhancementForSelectedSource() {
-        guard isEnhancementEnabled, privacy.isAccepted, !scanFilter.isFiltering,
-              !openingFile, !choosingFile, !showsHistory, importedDocument == nil,
-              let mesh else { scanEnhancement.cancel(); return }
-        scanEnhancement.start(mesh, settings: appliedEnhancementSettings ?? enhancementSettings)
     }
 
     private func clearErrors() {
         exportError = nil
         scanFilter.errorMessage = nil
-        scanEnhancement.errorMessage = nil
         history.errorMessage = nil
     }
 
@@ -750,8 +635,6 @@ struct ContentView: View {
     private func openFile(_ url: URL) {
         showsHistory = false
         openingHistory = false
-        showsPresentationSettings = false
-        scanEnhancement.cancel()
         showsFilterSettings = false
         scanFilter.cancel()
         pickerGeneration = UUID()
@@ -803,33 +686,12 @@ struct ContentView: View {
             scanner.allowCaptureAfterFileViewing()
             if hasEnteredCapture, privacy.isAccepted { scanner.prepare() }
         }
-        refreshEnhancementForSelectedSource()
-    }
-
-    @ViewBuilder
-    private var historySaveStatus: some View {
-        if historicalEntry == nil, sampleMesh == nil {
-            if history.isSaving {
-                Text("正在保存原始扫描至历史…")
-                    .font(.system(size: 11))
-                    .foregroundStyle(ScanTheme.secondary)
-            } else if history.hasFailedSaves {
-                Button("原始历史保存失败，点此重试") { history.retryFailedSaves() }
-                    .font(.system(size: 12))
-                    .foregroundStyle(ScanTheme.destructive)
-            } else if let source = scanner.result, history.entries.contains(where: { $0.id == source.renderIdentity }) {
-                Text("原始扫描已保存至历史")
-                    .font(.system(size: 11))
-                    .foregroundStyle(ScanTheme.secondary)
-            }
-        }
     }
 
     private func openHistoryList() {
         guard privacy.isAccepted else { showsPrivacy = true; return }
         wantsToScan = false
         scanFilter.cancel()
-        scanEnhancement.cancel()
         scanner.suspendCaptureForFileViewing()
         history.refresh()
         showsHistory = true
@@ -838,9 +700,7 @@ struct ContentView: View {
     private func openHistory(_ entry: ScanHistoryEntry) {
         guard privacy.isAccepted else { return }
         scanFilter.cancel()
-        scanEnhancement.cancel()
         showsFilterSettings = false
-        showsPresentationSettings = false
         wantsToScan = false
         scanner.suspendCaptureForFileViewing()
         cancelExport()
@@ -857,8 +717,7 @@ struct ContentView: View {
                 let source = try await history.load(entry)
                 guard !Task.isCancelled, importGeneration == token, privacy.isAccepted else { return }
                 scanFilter.reset()
-                scanEnhancement.reset()
-                resultStyle = .points
+                resultPointSizeScale = 1
                 savedNotice = false
                 historicalEntry = entry
                 historicalMesh = source
@@ -882,8 +741,6 @@ struct ContentView: View {
         historicalMesh = nil
         historicalEntry = nil
         scanFilter.reset()
-        scanEnhancement.reset()
-        resultStyle = .points
         savedNotice = false
         restoreCapture()
     }

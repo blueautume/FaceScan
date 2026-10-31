@@ -19,7 +19,6 @@ struct ScanPreviewSurface: View {
     var displayStyle: MeshDisplayStyle = .points
     var animatesAcquisition = false
     var pointSizeScale: Double = 1
-    var isDisplayEnhanced = false
 
     var body: some View {
         GeometryReader { geometry in
@@ -30,8 +29,7 @@ struct ScanPreviewSurface: View {
                                    resultFramingIdentity: resultFramingIdentity,
                                    displayStyle: displayStyle,
                                    animatesAcquisition: animatesAcquisition,
-                                   pointSizeScale: pointSizeScale,
-                                   isDisplayEnhanced: isDisplayEnhanced)
+                                   pointSizeScale: pointSizeScale)
                     .frame(width: showsPointCloud ? geometry.size.width : 130,
                            height: showsPointCloud ? geometry.size.height : 155)
                     .clipShape(RoundedRectangle(cornerRadius: showsPointCloud ? 0 : 16))

@@ -72,7 +72,7 @@ actor ScanHistoryRepository {
 
         var errorDescription: String? {
             switch self {
-            case .notOriginal: "历史记录只能保存未经滤波或增强的原始扫描。"
+            case .notOriginal: "历史记录只能保存未经处理的原始扫描。"
             case .invalidGeometry: "原始扫描数据无效，无法保存历史记录。"
             case .damagedRecord: "这份历史记录不完整或已损坏，无法打开。"
             case .missingRecord: "这份历史记录已不存在。"

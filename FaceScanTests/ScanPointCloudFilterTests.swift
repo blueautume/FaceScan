@@ -1,3 +1,4 @@
+import Foundation
 import XCTest
 @testable import FaceScan
 
@@ -134,6 +135,42 @@ final class ScanPointCloudFilterTests: XCTestCase {
         } catch is CancellationError {}
     }
 
+    func testProgressTracksCompletedStagesWithoutChangingTheFilteredOutput() throws {
+        let source = fixture()
+        var settings = ScanFilterSettings.gentle
+        settings.medianWindow = 3
+        settings.smoothingCurve = .featurePreserving
+        let expected = try ScanPointCloudFilter.process(source, settings: settings)
+        let observed = FilterProgressSamples()
+        let actual = try ScanPointCloudFilter.process(source, settings: settings,
+                                                     onProgress: { observed.append($0) })
+
+        let values = observed.values
+        XCTAssertEqual(values.first, 0)
+        XCTAssertEqual(values.last, 1)
+        XCTAssertTrue(values.allSatisfy { $0.isFinite && (0...1).contains($0) })
+        XCTAssertTrue(zip(values, values.dropFirst()).allSatisfy { $0 <= $1 })
+        XCTAssertGreaterThan(values.filter { $0 > 0.03 && $0 < 0.96 }.count, 4,
+                             "SOR, grid, adaptive, median and interpolation work must report intermediate completion.")
+        XCTAssertEqual(actual.mesh.vertices.map(\.position), expected.mesh.vertices.map(\.position))
+        XCTAssertEqual(actual.mesh.vertices.map(\.color), expected.mesh.vertices.map(\.color))
+        XCTAssertEqual(actual.statistics.outputCount, expected.statistics.outputCount)
+    }
+
+    func testCancellationDuringReportedWorkNeverReportsCompletion() throws {
+        let input = fixture().vertices.map {
+            FaceCloudPoint(position: $0.position,
+                           color: SIMD3(byte($0.color.x), byte($0.color.y), byte($0.color.z)))
+        }
+        let observed = FilterProgressSamples(cancelAt: 0.2)
+        XCTAssertThrowsError(try FacePointCloudProcessor.process(input,
+            onProgress: { observed.append($0) }, isCancelled: { observed.isCancelled })) { error in
+            XCTAssertTrue(error is CancellationError)
+        }
+        XCTAssertTrue(observed.values.contains { $0 >= 0.2 })
+        XCTAssertFalse(observed.values.contains(1), "Cancelled work must not claim successful completion.")
+    }
+
     private func fixture() -> ScanMesh {
         var vertices: [ScanVertex] = []
         for row in 0..<23 {
@@ -155,5 +192,34 @@ final class ScanPointCloudFilterTests: XCTestCase {
 
     private func byte(_ value: Float) -> UInt8 {
         UInt8((min(max(value, 0), 1) * 255).rounded(.toNearestOrEven))
+    }
+}
+
+/// Progress may be delivered from a detached worker; sample access is locked.
+private final class FilterProgressSamples: @unchecked Sendable {
+    private let lock = NSLock()
+    private var samples: [Double] = []
+    private let cancelAt: Double?
+    private var cancelled = false
+
+    init(cancelAt: Double? = nil) { self.cancelAt = cancelAt }
+
+    func append(_ value: Double) {
+        lock.lock()
+        samples.append(value)
+        if let cancelAt, value >= cancelAt { cancelled = true }
+        lock.unlock()
+    }
+
+    var values: [Double] {
+        lock.lock()
+        defer { lock.unlock() }
+        return samples
+    }
+
+    var isCancelled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return cancelled
     }
 }

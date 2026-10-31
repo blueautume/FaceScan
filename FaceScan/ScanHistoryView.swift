@@ -16,7 +16,7 @@ struct ScanHistoryView: View {
                 statusSection
                 recordsSection
                 Section {
-                    Text("扫描成功后自动保存一份原始点云，滤波和呈现增强不会覆盖它。历史仅存于本机，不自动淘汰；删除 App 会移除这些记录，请主动导出需要长期保留的模型。")
+                    Text("扫描成功后自动保存一份原始点云，滤波不会覆盖它。历史仅存于本机，不自动淘汰；删除 App 会移除这些记录，请主动导出需要长期保留的模型。")
                         .font(.footnote)
                         .foregroundStyle(ScanTheme.secondary)
                         .listRowBackground(ScanTheme.card)
@@ -160,7 +160,7 @@ struct ScanHistoryView: View {
         .padding(.vertical, 6)
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
-        .accessibilityHint("打开原始点云，可重新滤波、增强或导出。")
+        .accessibilityHint("打开原始点云，可重新滤波或导出。")
     }
 }
 

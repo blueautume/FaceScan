@@ -6,26 +6,20 @@ struct ScanFilterSettingsView: View {
     @Binding var settings: ScanFilterSettings
     let onApply: () -> Void
     @Environment(\.dismiss) private var dismiss
-    @State private var lastCurve = FaceCloudSmoothingCurve.featurePreserving
-
-    private var presetName: String {
-        if settings == .gentle { return "轻度" }
-        if settings == .reference { return "参考参数" }
-        return "自定义"
-    }
+    @State private var lastCurve = ScanFilterSettings.standard.smoothingCurve ?? .featurePreserving
 
     var body: some View {
         NavigationStack {
             Form {
                 Section {
                     HStack(spacing: 12) {
-                        presetButton("轻度", value: .gentle)
+                        presetButton("默认", value: .standard)
                         presetButton("参考参数", value: .reference)
                     }
-                    LabeledContent("当前参数", value: presetName)
+                    LabeledContent("当前参数", value: settings.presetName)
                         .font(.subheadline)
                 } footer: {
-                    Text("轻度预设减少平滑并保留原始颜色。调整后点“应用并滤波”，每次都从原始扫描重新计算。")
+                    Text("默认启用 3 × 3 中值与平滑强度曲线，并保留原始颜色。调整后点“应用并滤波”，每次都从原始扫描重新计算。")
                 }
 
                 curveSection

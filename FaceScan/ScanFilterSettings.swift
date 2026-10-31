@@ -24,7 +24,8 @@ struct ScanFilterSettings: Codable, Equatable, Sendable {
     /// Nil keeps the original geometry pipeline and preserves existing presets.
     var smoothingCurve: FaceCloudSmoothingCurve? = nil
 
-    static let storageKey = "FaceScan.filter.settings.v1"
+    static let storageKey = "FaceScan.filter.settings.v2"
+    static let legacyStorageKey = "FaceScan.filter.settings.v1"
     static let reference = ScanFilterSettings()
 
     /// A starting point for preserving detail, rather than an accuracy guarantee.
@@ -44,6 +45,25 @@ struct ScanFilterSettings: Codable, Equatable, Sendable {
         settings.filterColors = false
         return settings
     }()
+
+    /// Current default: the detail-preserving base with spatial median filtering
+    /// and the user's gradual, variation-dependent smoothing profile enabled.
+    static let standard: ScanFilterSettings = {
+        var settings = ScanFilterSettings.gentle
+        settings.medianWindow = 3
+        settings.smoothingCurve = FaceCloudSmoothingCurve(
+            strengths: [1, 1, 1, 0.85, 0.48],
+            maximumVariation: 0.0035,
+            neighborhoodRadius: 0.004)
+        return settings
+    }()
+
+    var presetName: String {
+        if self == .standard { return "默认" }
+        if self == .gentle { return "轻度" }
+        if self == .reference { return "参考参数" }
+        return "自定义"
+    }
 
     var configuration: FaceCloudConfiguration {
         var value = FaceCloudConfiguration.reference
@@ -88,9 +108,26 @@ struct ScanFilterSettings: Codable, Equatable, Sendable {
     }
 
     static func load(from defaults: UserDefaults = .standard) -> ScanFilterSettings {
-        guard let data = defaults.data(forKey: storageKey),
+        // Once v2 exists it is authoritative, even if damaged. Falling back to
+        // v1 here could silently restore older parameters after a later edit.
+        if defaults.object(forKey: storageKey) != nil {
+            return decodedSettings(from: defaults, key: storageKey) ?? .standard
+        }
+
+        let legacy = decodedSettings(from: defaults, key: legacyStorageKey)
+        // Upgrade the previous default, while retaining intentional reference
+        // or custom selections. The old bytes remain available for rollback.
+        let settings: ScanFilterSettings
+        if let legacy, legacy != .gentle { settings = legacy }
+        else { settings = .standard }
+        settings.save(to: defaults)
+        return settings
+    }
+
+    private static func decodedSettings(from defaults: UserDefaults, key: String) -> ScanFilterSettings? {
+        guard let data = defaults.data(forKey: key),
               let settings = try? JSONDecoder().decode(ScanFilterSettings.self, from: data),
-              settings.isValid else { return .gentle }
+              settings.isValid else { return nil }
         return settings
     }
 

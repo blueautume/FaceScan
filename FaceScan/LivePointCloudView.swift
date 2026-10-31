@@ -3,8 +3,7 @@ import SwiftUI
 import UIKit
 import simd
 
-/// A dedicated live/result renderer. Completed scans may supply a separate
-/// display-enhanced point copy, without changing the scan's measured data.
+/// A dedicated live/result renderer for original and filtered point clouds.
 /// Snapshots already use the face-local, meter-scale coordinate system (+Y up, +Z forward).
 struct LivePointCloudView: UIViewRepresentable {
     let snapshot: LivePointCloudSnapshot?
@@ -16,7 +15,6 @@ struct LivePointCloudView: UIViewRepresentable {
     var displayStyle: MeshDisplayStyle = .points
     var animatesAcquisition = false
     var pointSizeScale: Double = 1
-    var isDisplayEnhanced = false
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -37,7 +35,7 @@ struct LivePointCloudView: UIViewRepresentable {
                                    followsFacePose: followsFacePose, surfaceMesh: surfaceMesh,
                                    resultFramingIdentity: resultFramingIdentity,
                                    displayStyle: displayStyle, animatesAcquisition: animatesAcquisition,
-                                   pointSizeScale: pointSizeScale, isDisplayEnhanced: isDisplayEnhanced,
+                                   pointSizeScale: pointSizeScale,
                                    in: view)
         return view
     }
@@ -47,7 +45,7 @@ struct LivePointCloudView: UIViewRepresentable {
                                    followsFacePose: followsFacePose, surfaceMesh: surfaceMesh,
                                    resultFramingIdentity: resultFramingIdentity,
                                    displayStyle: displayStyle, animatesAcquisition: animatesAcquisition,
-                                   pointSizeScale: pointSizeScale, isDisplayEnhanced: isDisplayEnhanced,
+                                   pointSizeScale: pointSizeScale,
                                    in: uiView)
     }
 
@@ -119,7 +117,7 @@ struct LivePointCloudView: UIViewRepresentable {
                     resultFramingIdentity: UUID? = nil,
                     displayStyle: MeshDisplayStyle = .points,
                     animatesAcquisition: Bool = false,
-                    pointSizeScale: Double = 1, isDisplayEnhanced: Bool = false, in view: SCNView) {
+                    pointSizeScale: Double = 1, in view: SCNView) {
             let isFollowing = followsFacePose && poseStore != nil
             selectedStyle = displayStyle
             if resources.updatePointSizeScale(pointSizeScale) { view.setNeedsDisplay() }
@@ -138,8 +136,7 @@ struct LivePointCloudView: UIViewRepresentable {
             if let surfaceMesh {
                 let source = surfaceMesh.isSample ? "合成示例" : "扫描结果"
                 let version = surfaceMesh.isFiltered ? "滤波后点云" : "原始点云"
-                let processing = isDisplayEnhanced ? "\(version)，显示增强" : version
-                view.accessibilityLabel = "\(source)，\(processing)，\(surfaceMesh.vertexCount) 个点，可旋转和缩放"
+                view.accessibilityLabel = "\(source)，\(version)，\(surfaceMesh.vertexCount) 个点，可旋转和缩放"
             } else if let snapshot {
                 let source = snapshot.isSample ? "合成示例实时点云" : "实时扫描点云"
                 let interaction = isFollowing ? "随头部移动" : "可旋转和缩放"

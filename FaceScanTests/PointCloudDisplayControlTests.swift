@@ -63,13 +63,13 @@ final class PointCloudDisplayControlTests: XCTestCase {
     }
 
     @MainActor
-    func testCompletedPointSizingPreservesComparisonViewpointAndEnhancedAccessibility() async throws {
+    func testCompletedPointSizingPreservesComparisonViewpointAndAccessibility() async throws {
         let (view, coordinator) = renderer()
         defer { coordinator.stopAnimations(); view.stopRenderUpdates() }
         let mesh = ScanMesh(vertices: fixture(), triangleIndices: [], frameCount: 8,
                             coveredAngles: [.center], isFiltered: true)
         coordinator.update(snapshot: nil, surfaceMesh: mesh, resultFramingIdentity: mesh.renderIdentity,
-                           isDisplayEnhanced: true, in: view)
+                           in: view)
         await coordinator.waitForPendingUpdates()
         let node = try XCTUnwrap(view.poseNode)
         let geometry = try XCTUnwrap(node.geometry)
@@ -81,13 +81,13 @@ final class PointCloudDisplayControlTests: XCTestCase {
         let pose = node.simdTransform
 
         coordinator.update(snapshot: nil, surfaceMesh: mesh, resultFramingIdentity: mesh.renderIdentity,
-                           displayStyle: .color, pointSizeScale: 3, isDisplayEnhanced: true, in: view)
+                           pointSizeScale: 3, in: view)
         await coordinator.waitForPendingUpdates()
-        XCTAssertTrue(node.geometry === geometry, "Point-only results must also resize in the color display mode.")
+        XCTAssertTrue(node.geometry === geometry, "Sizing must reuse the completed point geometry.")
         assertSize(try XCTUnwrap(node.geometry?.elements.first), scale: 3)
         XCTAssertEqual(camera.simdTransform, cameraTransform)
         XCTAssertEqual(node.simdTransform, pose)
-        XCTAssertEqual(view.accessibilityLabel, "扫描结果，滤波后点云，显示增强，3 个点，可旋转和缩放")
+        XCTAssertEqual(view.accessibilityLabel, "扫描结果，滤波后点云，3 个点，可旋转和缩放")
         coordinator.update(snapshot: nil, surfaceMesh: mesh, resultFramingIdentity: mesh.renderIdentity,
                            pointSizeScale: 1, in: view)
         XCTAssertEqual(view.accessibilityLabel, "扫描结果，滤波后点云，3 个点，可旋转和缩放")
