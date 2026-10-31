@@ -11,6 +11,7 @@ final class LivePointCloudTests: XCTestCase {
         XCTAssertEqual(snapshot.vertices.map(\.position.x), [0, 0.02, 0.04, 0.06, 0.08, 0.1])
         XCTAssertEqual(snapshot.pointCount, 6)
         XCTAssertEqual(snapshot.confirmedPointCount, 101)
+        XCTAssertEqual(snapshot.pointIDs, [0, 20, 40, 60, 80, 100])
     }
 
     func testPointsFromLaterSideViewRemainVisibleAfterCapIsReached() throws {
@@ -24,6 +25,8 @@ final class LivePointCloudTests: XCTestCase {
         XCTAssertEqual(later.pointCount, 10)
         XCTAssertEqual(later.vertices.last?.position, withLaterSide.last?.position)
         XCTAssertTrue(later.vertices.contains { $0.position.x > front.last!.position.x })
+        XCTAssertEqual(earlier.pointIDs?.first, later.pointIDs?.first)
+        XCTAssertEqual(later.pointIDs?.last, 139)
     }
 
     func testUncappedPointsRetainOrderColorsAndMeterCoordinates() throws {
@@ -39,6 +42,7 @@ final class LivePointCloudTests: XCTestCase {
         XCTAssertEqual(snapshot.revision, 37)
         XCTAssertEqual(snapshot.confirmedPointCount, 2)
         XCTAssertFalse(snapshot.isSample)
+        XCTAssertEqual(snapshot.pointIDs, [0, 1])
     }
 
     func testSingleFramePointsAreExcludedBeforeSamplingAndCounting() throws {
@@ -50,6 +54,7 @@ final class LivePointCloudTests: XCTestCase {
 
         XCTAssertEqual(snapshot.vertices.map(\.position), [vertices[1].position, vertices[5].position])
         XCTAssertEqual(snapshot.confirmedPointCount, 3)
+        XCTAssertEqual(snapshot.pointIDs, [1, 5], "Sampling preserves fusion IDs, not compacted ranks.")
     }
 
     func testSnapshotIsNilForEmptyOrUnconfirmedInput() {
@@ -86,6 +91,7 @@ final class LivePointCloudTests: XCTestCase {
         XCTAssertEqual(Set(copiedIndices).count, 24_000)
         XCTAssertEqual(copiedIndices.first, 0)
         XCTAssertEqual(copiedIndices.last, 179_999)
+        XCTAssertEqual(snapshot.pointIDs, copiedIndices.map(UInt64.init))
         XCTAssertTrue(zip(copiedIndices, copiedIndices.dropFirst()).allSatisfy { $0.0 < $0.1 })
     }
 
@@ -99,6 +105,22 @@ final class LivePointCloudTests: XCTestCase {
         XCTAssertEqual(single.pointCount, 1)
         XCTAssertEqual(single.vertices[0].position, vertices[8].position)
         XCTAssertEqual(single.confirmedPointCount, 17)
+        XCTAssertEqual(first.pointIDs, repeated.pointIDs)
+        XCTAssertEqual(single.pointIDs, [8])
+    }
+
+    func testFusionIndicesRemainStableWhenMeasuredPositionsAndColorsChange() throws {
+        let original = fixture(count: 12)
+        let updated = original.map {
+            ScanVertex(position: $0.position + SIMD3(0.005, -0.002, 0.001),
+                       color: SIMD3(0.1, 0.2, 0.3))
+        }
+        let first = try XCTUnwrap(sample(original, maximumPoints: 5))
+        let second = try XCTUnwrap(sample(updated, maximumPoints: 5, revision: 6))
+
+        XCTAssertEqual(first.pointIDs, second.pointIDs)
+        XCTAssertNotEqual(first.vertices.map(\.position), second.vertices.map(\.position))
+        XCTAssertNotEqual(first.vertices.map(\.color), second.vertices.map(\.color))
     }
 
     private func sample(_ vertices: [ScanVertex], observations: [Int]? = nil,

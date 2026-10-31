@@ -94,6 +94,9 @@ final class PointCloudRenderClockTests: XCTestCase {
         XCTAssertNil(context.view.window)
         XCTAssertFalse(context.view.isRenderClockRunning)
         XCTAssertTrue(context.flight.isActive)
+        XCTAssertFalse(context.view.rendersContinuously,
+                       "Removing the view must sleep GPU rendering before the finite arc deadline.")
+        XCTAssertFalse(context.view.isPlaying)
         await eventually(timeout: 0.5) { !context.flight.isActive }
         XCTAssertFalse(context.flight.isActive)
         XCTAssertFalse(context.view.rendersContinuously)
@@ -101,6 +104,91 @@ final class PointCloudRenderClockTests: XCTestCase {
         XCTAssertFalse(context.view.isRenderClockRunning)
         let enabled = context.geometry.firstMaterial?.value(forKey: "pointFlightEnabled") as? NSNumber
         XCTAssertEqual(enabled?.floatValue, 0)
+    }
+
+    @MainActor
+    func testLiveSheenContinuesAfterArcsSettleWithoutNewSnapshots() async throws {
+        let context = try VisibleClockContext()
+        defer { context.close() }
+        let pointCount = context.geometry.elements.first?.primitiveCount
+        context.flight.activate(geometry: context.geometry, endTime: CACurrentMediaTime() + 0.06,
+                                showsActivity: true)
+        await eventually { !context.flight.isActive }
+        XCTAssertFalse(context.flight.isActive)
+        XCTAssertTrue(context.flight.needsRenderUpdates)
+        XCTAssertTrue(context.view.isRenderClockRunning)
+        XCTAssertTrue(context.view.rendersContinuously)
+        let settledTime = try shaderTime(in: context.geometry)
+        await eventually { ((try? self.shaderTime(in: context.geometry)) ?? settledTime) > settledTime }
+        XCTAssertGreaterThan(try shaderTime(in: context.geometry), settledTime)
+        XCTAssertEqual(context.geometry.elements.first?.primitiveCount, pointCount,
+                       "Activity must not fabricate particles while the source stays still.")
+        XCTAssertEqual(uniform("pointFlightEnabled", in: context.geometry), 0)
+        XCTAssertEqual(uniform("pointAcquisitionActivity", in: context.geometry), 1)
+        context.flight.finish()
+        XCTAssertFalse(context.flight.needsRenderUpdates)
+        XCTAssertFalse(context.view.isRenderClockRunning)
+        XCTAssertFalse(context.view.rendersContinuously)
+        XCTAssertEqual(uniform("pointAcquisitionActivity", in: context.geometry), 0)
+    }
+
+    @MainActor
+    func testReducedMotionImmediatelySettlesAndDoesNotReplaySeenPoints() async throws {
+        var reduced = false
+        let context = try VisibleClockContext(reduceMotion: { reduced })
+        defer { context.close() }
+        context.flight.activate(geometry: context.geometry, endTime: CACurrentMediaTime() + 0.8,
+                                showsActivity: true)
+        XCTAssertTrue(context.flight.isActive)
+        reduced = true
+        context.flight.updateMotionPreference()
+        XCTAssertFalse(context.flight.isActive)
+        XCTAssertFalse(context.flight.needsRenderUpdates)
+        XCTAssertEqual(uniform("pointFlightEnabled", in: context.geometry), 0)
+        XCTAssertEqual(uniform("pointAcquisitionActivity", in: context.geometry), 0)
+        reduced = false
+        context.flight.updateMotionPreference()
+        XCTAssertFalse(context.flight.isActive, "Switching the setting back must not replay old arcs.")
+        XCTAssertGreaterThan(uniform("pointFlightMotionEpoch", in: context.geometry) ?? -.infinity,
+                             uniform("pointFlightPresentedTime", in: context.geometry) ?? .infinity)
+        XCTAssertTrue(context.flight.needsRenderUpdates, "The subtle live signal can resume independently.")
+        context.flight.finish()
+    }
+
+    @MainActor
+    func testReducedMotionAtStartKeepsMeasuredPointsStatic() throws {
+        let context = try VisibleClockContext(reduceMotion: { true })
+        defer { context.close() }
+        context.flight.activate(geometry: context.geometry, endTime: CACurrentMediaTime() + 0.8,
+                                showsActivity: true)
+        XCTAssertFalse(context.flight.isActive)
+        XCTAssertFalse(context.flight.needsRenderUpdates)
+        XCTAssertFalse(context.view.rendersContinuously)
+        XCTAssertEqual(uniform("pointFlightEnabled", in: context.geometry), 0)
+        XCTAssertEqual(uniform("pointAcquisitionActivity", in: context.geometry), 0)
+    }
+
+    @MainActor
+    func testActivitySleepsOffscreenAndResumesWithoutReplayingArcs() async throws {
+        let context = try VisibleClockContext()
+        defer { context.close() }
+        context.flight.activate(geometry: context.geometry, endTime: CACurrentMediaTime() + 0.06,
+                                showsActivity: true)
+        await eventually { !context.flight.isActive }
+        let host = try XCTUnwrap(context.view.superview)
+        context.view.removeFromSuperview()
+        XCTAssertFalse(context.view.isRenderClockRunning)
+        XCTAssertFalse(context.view.rendersContinuously)
+        host.addSubview(context.view)
+        XCTAssertFalse(context.flight.isActive)
+        XCTAssertTrue(context.view.isRenderClockRunning)
+        XCTAssertTrue(context.view.rendersContinuously)
+        context.flight.finish()
+    }
+
+    @MainActor
+    private func uniform(_ key: String, in geometry: SCNGeometry) -> Float? {
+        (geometry.firstMaterial?.value(forKey: key) as? NSNumber)?.floatValue
     }
 
     @MainActor
@@ -127,7 +215,7 @@ private final class VisibleClockContext {
     private let window: UIWindow
     private let previousKeyWindow: UIWindow?
 
-    init() throws {
+    init(reduceMotion: @escaping @MainActor () -> Bool = { UIAccessibility.isReduceMotionEnabled }) throws {
         previousKeyWindow = UIApplication.shared.connectedScenes
             .compactMap { $0 as? UIWindowScene }.flatMap(\.windows).first(where: \.isKeyWindow)
         window = previousKeyWindow?.windowScene.map(UIWindow.init(windowScene:))
@@ -143,7 +231,7 @@ private final class VisibleClockContext {
         ], animates: true, time: CACurrentMediaTime())
         geometry = try XCTUnwrap(PointCloudRenderResources().make(data: data).points)
         node.geometry = geometry
-        flight = PointCloudFlight(view: view)
+        flight = PointCloudFlight(view: view, reduceMotion: reduceMotion)
         let host = UIViewController()
         host.view.addSubview(view)
         window.rootViewController = host

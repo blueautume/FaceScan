@@ -462,7 +462,7 @@ final class ScanPresentationTests: XCTestCase {
         let firstGeometry = try XCTUnwrap(node.geometry)
         let birth = try birthTime(in: firstGeometry, index: 0)
         XCTAssertGreaterThanOrEqual(birth, 0)
-        XCTAssertTrue(view.rendersContinuously)
+        XCTAssertEqual((node.geometry?.firstMaterial?.value(forKey: "pointFlightEnabled") as? NSNumber)?.floatValue, 1)
         coordinator.update(snapshot: first, animatesAcquisition: true, in: view)
         await coordinator.waitForPendingUpdates()
         XCTAssertTrue(node.geometry === firstGeometry)
@@ -501,8 +501,10 @@ final class ScanPresentationTests: XCTestCase {
                                                             confirmedPointCount: 3),
                            animatesAcquisition: true, in: view)
         await coordinator.waitForPendingUpdates()
-        XCTAssertTrue(view.rendersContinuously)
+        let node = try XCTUnwrap(view.scene?.rootNode.childNode(withName: "livePointCloud", recursively: false))
+        XCTAssertEqual((node.geometry?.firstMaterial?.value(forKey: "pointFlightEnabled") as? NSNumber)?.floatValue, 1)
         try await Task.sleep(for: .seconds(PointCloudFlight.duration + 0.15))
+        XCTAssertEqual((node.geometry?.firstMaterial?.value(forKey: "pointFlightEnabled") as? NSNumber)?.floatValue, 0)
         XCTAssertFalse(view.rendersContinuously)
         XCTAssertFalse(view.isPlaying)
     }
@@ -522,14 +524,17 @@ final class ScanPresentationTests: XCTestCase {
                            animatesAcquisition: true, in: view)
         await coordinator.waitForPendingUpdates()
         try await Task.sleep(for: .milliseconds(400))
-        XCTAssertTrue(view.rendersContinuously, "The old deadline must not stop newly acquired particles.")
-        try await Task.sleep(for: .milliseconds(500))
+        let node = try XCTUnwrap(view.scene?.rootNode.childNode(withName: "livePointCloud", recursively: false))
+        XCTAssertEqual((node.geometry?.firstMaterial?.value(forKey: "pointFlightEnabled") as? NSNumber)?.floatValue, 1,
+                       "The old deadline must not stop newly acquired particles.")
+        try await Task.sleep(for: .milliseconds(750))
+        XCTAssertEqual((node.geometry?.firstMaterial?.value(forKey: "pointFlightEnabled") as? NSNumber)?.floatValue, 0)
         XCTAssertFalse(view.rendersContinuously)
         XCTAssertFalse(view.isPlaying)
     }
 
     @MainActor
-    func testGPUFlightDoesNotRotateOrMovePointsSideways() async throws {
+    func testGPUArcsMoveThenReturnExactlyToMeasuredGeometry() async throws {
         let (view, coordinator) = renderer()
         defer { coordinator.stopAnimations() }
         view.pointOfView?.camera?.usesOrthographicProjection = true
@@ -541,11 +546,16 @@ final class ScanPresentationTests: XCTestCase {
         let node = try XCTUnwrap(view.scene?.rootNode.childNode(withName: "livePointCloud", recursively: false))
         let material = try XCTUnwrap(node.geometry?.firstMaterial)
         let birth = try birthTime(in: XCTUnwrap(node.geometry), index: 0)
-        material.setValue(birth, forKey: "pointFlightTime")
+        material.setValue(Float(0), forKey: "pointAcquisitionActivity")
+        material.setValue(birth + 0.2, forKey: "pointFlightTime")
         let flying = try XCTUnwrap(view.snapshot().cgImage?.dataProvider?.data) as Data
         material.setValue(birth + Float(PointCloudFlight.duration), forKey: "pointFlightTime")
         let arrived = try XCTUnwrap(view.snapshot().cgImage?.dataProvider?.data) as Data
-        XCTAssertEqual(flying, arrived, "Orthographic X/Y must stay fixed throughout the straight depth-only flight.")
+        XCTAssertNotEqual(flying, arrived, "Short arcs must visibly move new points in X/Y as well as depth.")
+        material.setValue(Float(0), forKey: "pointAcquisitionActivity")
+        material.setValue(Float(0), forKey: "pointFlightEnabled")
+        let staticResult = try XCTUnwrap(view.snapshot().cgImage?.dataProvider?.data) as Data
+        XCTAssertEqual(arrived, staticResult, "The last arc frame must equal the exact static measured geometry.")
         node.isHidden = true
         let empty = try XCTUnwrap(view.snapshot().cgImage?.dataProvider?.data) as Data
         XCTAssertNotEqual(arrived, empty, "The shader must actually render visible particles.")
@@ -593,7 +603,9 @@ final class ScanPresentationTests: XCTestCase {
     private func birthTime(in geometry: SCNGeometry, index: Int) throws -> Float {
         let source = try XCTUnwrap(geometry.sources(for: .texcoord).first)
         return source.data.withUnsafeBytes {
-            $0.loadUnaligned(fromByteOffset: source.dataOffset + index * source.dataStride, as: Float.self)
+            let value = $0.loadUnaligned(fromByteOffset: source.dataOffset + index * source.dataStride, as: Float.self)
+            let presented = (geometry.firstMaterial?.value(forKey: "pointFlightPresentedTime") as? NSNumber)?.floatValue ?? 0
+            return value < 0 ? presented - value - 1 : value
         }
     }
 }

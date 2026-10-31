@@ -461,7 +461,8 @@ struct ContentView: View {
             let count = points.count * revision / 40
             syntheticSnapshot = LivePointCloudSnapshot(
                 revision: revision, vertices: Array(points.prefix(count)),
-                confirmedPointCount: count, isSample: true)
+                confirmedPointCount: count, isSample: true,
+                pointIDs: (0..<count).map(UInt64.init))
             try? await Task.sleep(for: .milliseconds(180))
         }
     }

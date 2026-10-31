@@ -8,6 +8,7 @@ import os
 final class PointCloudRenderPipeline {
     struct Input: Sendable {
         let vertices: [ScanVertex]
+        var pointIDs: [UInt64]? = nil
         var triangleIndices: [UInt32] = []
         var animates = false
     }
@@ -16,7 +17,7 @@ final class PointCloudRenderPipeline {
         let generation: UInt64
         let sequence: UInt64
         let input: Input
-        let completion: @MainActor (PointCloudRenderData) -> Void
+        let present: @MainActor (PointCloudRenderData) -> TimeInterval?
     }
 
     private final class Worker: @unchecked Sendable {
@@ -35,7 +36,8 @@ final class PointCloudRenderPipeline {
             defer { os_signpost(.end, log: log, name: "Prepare Point Cloud") }
             _ = PointCloudAnimationTime.origin
             builder.beginPreparation()
-            return builder.prepare(vertices: input.vertices, triangleIndices: input.triangleIndices,
+            return builder.prepare(vertices: input.vertices, pointIDs: input.pointIDs,
+                                   triangleIndices: input.triangleIndices,
                                    animates: input.animates, time: CACurrentMediaTime())
         }
     }
@@ -45,12 +47,23 @@ final class PointCloudRenderPipeline {
     private var sequence: UInt64 = 0
     private var running: Request?
     private var pending: Request?
+    private var lastPresentedSequence: UInt64?
+    private var pendingAcknowledgements = 0
     private var waiters: [CheckedContinuation<Void, Never>] = []
 
     func submit(_ input: Input, completion: @escaping @MainActor (PointCloudRenderData) -> Void) {
+        submitForPresentation(input, present: { data in
+            completion(data)
+            return CACurrentMediaTime()
+        })
+    }
+
+    /// Return the timestamp of the SCN presentation commit, or nil when the
+    /// consumer rejected the frame. Only a presented frame may consume births.
+    func submitForPresentation(_ input: Input, present: @escaping @MainActor (PointCloudRenderData) -> TimeInterval?) {
         sequence &+= 1
         let request = Request(generation: generation, sequence: sequence,
-                              input: input, completion: completion)
+                              input: input, present: present)
         if running == nil { start(request) }
         else { pending = request }
     }
@@ -58,11 +71,12 @@ final class PointCloudRenderPipeline {
     func reset() {
         generation &+= 1
         pending = nil
+        lastPresentedSequence = nil
         resumeWaitersIfIdle()
     }
 
     func waitUntilIdle() async {
-        guard running != nil || pending != nil else { return }
+        guard running != nil || pending != nil || pendingAcknowledgements > 0 else { return }
         await withCheckedContinuation { waiters.append($0) }
     }
 
@@ -76,14 +90,28 @@ final class PointCloudRenderPipeline {
     }
 
     private func complete(_ request: Request, data: PointCloudRenderData) {
-        running = nil
-        let accepted = request.generation == generation && request.sequence == sequence
+        // Keep the running slot occupied throughout presentation. A reentrant
+        // submit can replace pending work, but cannot start an overlapping job
+        // or overtake the birth acknowledgement for the frame being presented.
+        let canPresent = request.generation == generation
+            && (lastPresentedSequence.map { request.sequence > $0 } ?? true)
+        let presentedAt = canPresent ? request.present(data) : nil
+        // The consumer may reset or change scans while presenting.
+        let accepted = request.generation == generation && presentedAt?.isFinite == true
+        if accepted { lastPresentedSequence = request.sequence }
         let worker = worker
-        worker.queue.async { worker.builder.finishPreparation(accepted: accepted) }
-        if accepted {
-            request.completion(data)
+        pendingAcknowledgements += 1
+        worker.queue.async { [weak self] in
+            worker.builder.finishPreparation(accepted: accepted,
+                                             presentedAt: accepted ? presentedAt : nil)
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.pendingAcknowledgements -= 1
+                self.resumeWaitersIfIdle()
+            }
         }
-        if running == nil, let next = pending {
+        running = nil
+        if let next = pending {
             pending = nil
             start(next)
         }
@@ -91,7 +119,7 @@ final class PointCloudRenderPipeline {
     }
 
     private func resumeWaitersIfIdle() {
-        guard running == nil, pending == nil else { return }
+        guard running == nil, pending == nil, pendingAcknowledgements == 0 else { return }
         let continuations = waiters
         waiters.removeAll(keepingCapacity: true)
         continuations.forEach { $0.resume() }

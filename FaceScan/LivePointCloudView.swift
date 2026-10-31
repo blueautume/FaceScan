@@ -206,21 +206,37 @@ struct LivePointCloudView: UIViewRepresentable {
             requestedContent = content
             let input = PointCloudRenderPipeline.Input(
                 vertices: surfaceMesh?.vertices ?? snapshot?.vertices ?? [],
+                pointIDs: surfaceMesh == nil ? snapshot?.pointIDs : nil,
                 triangleIndices: surfaceMesh?.triangleIndices ?? [], animates: animatesAcquisition)
-            pipeline.submit(input) { [weak self, weak view] data in
-                guard let self, let view, self.requestedContent == content else { return }
+            pipeline.submitForPresentation(input, present: { [weak self, weak view] data in
+                guard let self, let view else { return nil }
+                if animatesAcquisition, surfaceMesh == nil {
+                    // Newer live snapshots may already be waiting. Present this
+                    // valid intermediate frame instead of starving the display.
+                    guard self.isAcquiring, self.requestedContent?.meshIdentity == nil,
+                          let revision = content.revision,
+                          self.renderedContent?.revision.map({ revision >= $0 }) ?? true else { return nil }
+                } else {
+                    // Result changes still use the exact requested identity;
+                    // an obsolete original/filtered result must never flash up.
+                    guard self.requestedContent == content else { return nil }
+                }
                 self.preparedGeometry = self.resources.make(data: data)
                 self.preparedCenter = data.center
                 self.renderedContent = content
                 SCNTransaction.begin()
                 SCNTransaction.disableActions = true
                 self.presentPreparedGeometry(in: view, presentsResult: presentsResult)
+                let presentedAt = CACurrentMediaTime()
                 if self.isAcquiring {
-                    self.flight?.activate(geometry: self.pointNode.geometry, endTime: data.animationEndTime)
+                    self.flight?.activate(geometry: self.pointNode.geometry,
+                                          endTime: data.animationEndTime(presentedAt: presentedAt),
+                                          presentedAt: presentedAt, showsActivity: self.isAcquiring)
                 }
                 SCNTransaction.commit()
                 view.setNeedsDisplay()
-            }
+                return presentedAt
+            })
         }
 
         func stopAnimations() {
@@ -390,6 +406,7 @@ final class LivePointCloudSceneView: SCNView {
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
+        flightAnimation?.visibilityDidChange()
         updateRenderClock()
     }
 
@@ -461,7 +478,7 @@ final class LivePointCloudSceneView: SCNView {
     }
 
     func updateRenderClock() {
-        guard window != nil, followsFacePose || flightAnimation?.isActive == true else {
+        guard window != nil, followsFacePose || flightAnimation?.needsRenderUpdates == true else {
             renderDisplayLink?.invalidate()
             renderDisplayLink = nil
             return

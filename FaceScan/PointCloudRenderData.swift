@@ -10,8 +10,28 @@ struct PointCloudRenderData: Sendable {
     let pointCount: Int
     let surfaceIndexData: Data
     let center: SIMD3<Float>?
+    /// Two Float32 values per particle: birth time and a stable seed in 0...1.
+    /// A negative birth encodes an unpresented delay as -(1 + delay).
     let birthData: Data?
-    let animationEndTime: TimeInterval?
+    let preparationTime: TimeInterval
+    let historicalAnimationEndTime: TimeInterval?
+    let latestPendingBirthEndOffset: TimeInterval?
+
+    /// Compatibility estimate. A displayed batch must instead use the actual
+    /// presentation timestamp so background packing does not consume its flight.
+    var animationEndTime: TimeInterval? { animationEndTime(presentedAt: preparationTime) }
+
+    func animationEndTime(presentedAt time: TimeInterval) -> TimeInterval? {
+        guard birthData != nil else { return nil }
+        let shownAt = time.isFinite ? time : preparationTime
+        let pendingEnd = latestPendingBirthEndOffset.map { shownAt + $0 }
+        switch (historicalAnimationEndTime, pendingEnd) {
+        case let (historical?, pending?): return max(historical, pending)
+        case let (historical?, nil): return historical
+        case let (nil, pending?): return pending
+        case (nil, nil): return nil
+        }
+    }
 }
 
 /// A single serial preparation worker owns the workspace and particle history.
@@ -23,34 +43,59 @@ final class PointCloudRenderDataBuilder {
     private var sequentialIndices: [UInt32] = []
     private var cachedPointCount = -1
     private var cachedPointIndices = Data()
-    private var births: [Cell: Birth] = [:]
+    private var births: [ParticleIdentity: Birth] = [:]
     private var endTime: TimeInterval = 0
     private var recordingBirths = false
-    private var originalBirths: [Cell: OriginalBirth] = [:]
-    private var historyBeforeClear: [Cell: Birth]?
+    private var originalBirths: [ParticleIdentity: OriginalBirth] = [:]
+    private var pendingBirths: Set<ParticleIdentity> = []
+    private var historyBeforeClear: [ParticleIdentity: Birth]?
     private var originalEndTime: TimeInterval = 0
 
-    private struct Cell: Hashable {
-        let x: Int
-        let y: Int
-        let z: Int
+    private enum ParticleIdentity: Hashable {
+        case measured(UInt64)
+        case fixture(PositionKey)
 
-        init(_ position: SIMD3<Float>) {
-            x = Int((position.x / 0.004).rounded())
-            y = Int((position.y / 0.004).rounded())
-            z = Int((position.z / 0.004).rounded())
+        var seed: Float {
+            let hash: UInt64
+            switch self {
+            case .measured(let id):
+                hash = Self.mix(id ^ 0xA0761D6478BD642F)
+            case .fixture(let key):
+                let x = Self.mix(UInt64(bitPattern: key.x) ^ 0xE7037ED1A0B428DB)
+                let y = Self.mix(UInt64(bitPattern: key.y) ^ 0x8EBC6AF09C88C6E3)
+                let z = Self.mix(UInt64(bitPattern: key.z) ^ 0x589965CC75374CC3)
+                hash = Self.mix(x ^ y ^ z)
+            }
+            // Float32 exactly represents these 24-bit integers. The result is
+            // reproducible across process launches, unlike Swift.Hasher.
+            return Float(hash >> 40) / Float(0xFF_FFFF)
         }
 
-        init(x: Int, y: Int, z: Int) {
-            self.x = x
-            self.y = y
-            self.z = z
+        private static func mix(_ input: UInt64) -> UInt64 {
+            var value = input &+ 0x9E3779B97F4A7C15
+            value = (value ^ (value >> 30)) &* 0xBF58476D1CE4E5B9
+            value = (value ^ (value >> 27)) &* 0x94D049BB133111EB
+            return value ^ (value >> 31)
+        }
+    }
+
+    /// A precise fallback for explicit fixtures that do not carry fusion IDs.
+    /// Distinct nearby measured points must never inherit a neighbour's birth.
+    private struct PositionKey: Hashable {
+        let x: Int64
+        let y: Int64
+        let z: Int64
+
+        init(_ position: SIMD3<Float>) {
+            x = Int64((Double(position.x) * 1_000_000).rounded())
+            y = Int64((Double(position.y) * 1_000_000).rounded())
+            z = Int64((Double(position.z) * 1_000_000).rounded())
         }
     }
 
     private struct Birth {
-        let position: SIMD3<Float>
-        let time: Float
+        var time: Float
+        let seed: Float
     }
 
     private struct OriginalBirth {
@@ -60,45 +105,66 @@ final class PointCloudRenderDataBuilder {
     func reset() {
         recordingBirths = false
         originalBirths.removeAll(keepingCapacity: true)
+        pendingBirths.removeAll(keepingCapacity: true)
         historyBeforeClear = nil
         births.removeAll(keepingCapacity: true)
         endTime = 0
     }
 
-    // A superseded preparation is never shown. Roll its new births back so
-    // those particles still receive their full flight on the next visible frame.
+    // New births remain pending until the main actor reports that geometry was
+    // actually mounted. A rejected or unmounted batch consumes no flight.
     func beginPreparation() {
         precondition(!recordingBirths)
         recordingBirths = true
         originalEndTime = endTime
     }
 
-    func finishPreparation(accepted: Bool) {
+    func finishPreparation(accepted: Bool, presentedAt: TimeInterval? = nil) {
         guard recordingBirths else { return }
-        if !accepted {
+        if accepted, let presentedAt, presentedAt.isFinite {
+            let shownAt = max(PointCloudAnimationTime.origin, presentedAt)
+            let shaderTime = PointCloudAnimationTime.shaderTime(at: shownAt)
+            for identity in pendingBirths {
+                guard var birth = births[identity], birth.time < 0 else { continue }
+                let delay = -birth.time - 1
+                birth.time = shaderTime + delay
+                births[identity] = birth
+                endTime = max(endTime, PointCloudAnimationTime.origin + Double(birth.time)
+                              + Self.duration(for: birth.seed))
+            }
+        } else {
             if let historyBeforeClear {
                 births = historyBeforeClear
             } else {
-                for (cell, original) in originalBirths { births[cell] = original.value }
+                for (identity, original) in originalBirths { births[identity] = original.value }
             }
             endTime = originalEndTime
         }
         recordingBirths = false
         originalBirths.removeAll(keepingCapacity: true)
+        pendingBirths.removeAll(keepingCapacity: true)
         historyBeforeClear = nil
     }
 
     private func clearBirthHistory() {
         if recordingBirths, historyBeforeClear == nil {
             var original = births
-            for (cell, previous) in originalBirths { original[cell] = previous.value }
+            for (identity, previous) in originalBirths { original[identity] = previous.value }
             historyBeforeClear = original
         }
         births.removeAll(keepingCapacity: true)
+        pendingBirths.removeAll(keepingCapacity: true)
     }
 
-    func prepare(vertices: [ScanVertex], triangleIndices: [UInt32] = [],
-                 animates: Bool = false, time: TimeInterval = 0) -> PointCloudRenderData {
+    /// Outside an explicit preparation transaction, `time` is treated as an
+    /// immediate presentation timestamp for synchronous fixtures and tools.
+    /// The production pipeline always brackets work with begin/finish ACKs.
+    func prepare(vertices: [ScanVertex], pointIDs: [UInt64]? = nil,
+                 triangleIndices: [UInt32] = [], animates: Bool = false,
+                 time: TimeInterval = 0) -> PointCloudRenderData {
+        let preparationTime = time.isFinite ? max(PointCloudAnimationTime.origin, time)
+            : PointCloudAnimationTime.origin
+        let validIDs = pointIDs?.count == vertices.count ? pointIDs : nil
         values.removeAll(keepingCapacity: true)
         values.reserveCapacity(vertices.count * 6)
         surfaceIndices.removeAll(keepingCapacity: true)
@@ -110,7 +176,7 @@ final class PointCloudRenderDataBuilder {
             remapping.reserveCapacity(vertices.count)
             remapping.append(contentsOf: repeatElement(-1, count: vertices.count))
         }
-        if births.count > 100_000 { clearBirthHistory() }
+        var pendingEndOffset: TimeInterval?
         var low = SIMD3<Float>(repeating: .infinity)
         var high = SIMD3<Float>(repeating: -.infinity)
         for (index, vertex) in vertices.enumerated() {
@@ -127,10 +193,15 @@ final class PointCloudRenderDataBuilder {
             low = simd_min(low, position)
             high = simd_max(high, position)
             if animates {
-                let birth = birthTime(for: position, time: time)
-                birthValues.append(birth)
-                birthValues.append(0)
-                endTime = max(endTime, PointCloudAnimationTime.origin + Double(birth) + 0.8)
+                let identity = validIDs.map { ParticleIdentity.measured($0[index]) }
+                    ?? .fixture(PositionKey(position))
+                let birth = birth(for: identity, at: preparationTime)
+                birthValues.append(birth.time)
+                birthValues.append(birth.seed)
+                if birth.time < 0 {
+                    let offset = Double(-birth.time - 1) + Self.duration(for: birth.seed)
+                    pendingEndOffset = max(pendingEndOffset ?? 0, offset)
+                }
             }
         }
 
@@ -175,7 +246,9 @@ final class PointCloudRenderDataBuilder {
             surfaceIndexData: surfaceIndices.withUnsafeBytes { Data($0) },
             center: pointCount > 0 ? (low + high) * 0.5 : nil,
             birthData: animates && pointCount > 0 ? birthValues.withUnsafeBytes { Data($0) } : nil,
-            animationEndTime: animates && pointCount > 0 ? endTime : nil)
+            preparationTime: preparationTime,
+            historicalAnimationEndTime: animates && pointCount > 0 && endTime > 0 ? endTime : nil,
+            latestPendingBirthEndOffset: pendingEndOffset)
     }
 
     static func isRenderable(_ vertex: ScanVertex) -> Bool {
@@ -187,29 +260,27 @@ final class PointCloudRenderDataBuilder {
             && (0...1).contains(c.x) && (0...1).contains(c.y) && (0...1).contains(c.z)
     }
 
-    private func birthTime(for position: SIMD3<Float>, time: TimeInterval) -> Float {
-        let cell = Cell(position)
-        var birth = births[cell]?.time
-        if birth == nil {
-            nearby: for z in -1...1 {
-                for y in -1...1 {
-                    for x in -1...1 {
-                        let neighbor = Cell(x: cell.x + x, y: cell.y + y, z: cell.z + z)
-                        if let previous = births[neighbor],
-                           simd_distance_squared(previous.position, position) <= 0.000016 {
-                            birth = previous.time
-                            break nearby
-                        }
-                    }
-                }
+    private func birth(for identity: ParticleIdentity, at time: TimeInterval) -> Birth {
+        if let previous = births[identity] { return previous }
+        let seed = identity.seed
+        let delay = Float(Double(seed) * PointCloudParticleStyle.revealSpread)
+        let start = recordingBirths ? -(1 + delay)
+            : PointCloudAnimationTime.shaderTime(at: time) + delay
+        let birth = Birth(time: start, seed: seed)
+        if recordingBirths {
+            if historyBeforeClear == nil, originalBirths[identity] == nil {
+                originalBirths[identity] = OriginalBirth(value: nil)
             }
+            pendingBirths.insert(identity)
+        } else {
+            endTime = max(endTime, PointCloudAnimationTime.origin + Double(start) + Self.duration(for: seed))
         }
-        let start = birth ?? PointCloudAnimationTime.shaderTime(at: time)
-        if recordingBirths, historyBeforeClear == nil, originalBirths[cell] == nil {
-            originalBirths[cell] = OriginalBirth(value: births[cell])
-        }
-        births[cell] = Birth(position: position, time: start)
-        return start
+        births[identity] = birth
+        return birth
+    }
+
+    private static func duration(for seed: Float) -> TimeInterval {
+        PointCloudParticleStyle.duration(seed: seed)
     }
 }
 
@@ -275,6 +346,16 @@ final class PointCloudRenderResources {
         }
         let points = SCNGeometry(sources: sources, elements: [cachedPointElement!])
         points.materials = [data.birthData == nil ? material : flightMaterial]
+        if data.birthData != nil {
+            // The GPU moves particles outside the measured bounds while they
+            // converge. Expanding only SceneKit's culling box keeps that path
+            // visible without changing any measured vertex or framing center.
+            let bounds = points.boundingBox
+            let margin: Float = 0.025
+            points.boundingBox = (
+                SCNVector3(bounds.min.x - margin, bounds.min.y - margin, bounds.min.z - margin),
+                SCNVector3(bounds.max.x + margin, bounds.max.y + margin, bounds.max.z + margin))
+        }
         guard !data.surfaceIndexData.isEmpty else { return (points, points) }
         let triangles = SCNGeometryElement(data: data.surfaceIndexData, primitiveType: .triangles,
                                           primitiveCount: data.surfaceIndexData.count / 12, bytesPerIndex: 4)

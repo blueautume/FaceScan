@@ -8,6 +8,9 @@ struct LivePointCloudSnapshot: Sendable {
     var vertices: [ScanVertex]
     var confirmedPointCount: Int
     var isSample: Bool = false
+    /// Stable indices in the fusion accumulator, aligned with `vertices`.
+    /// Fixtures without measured identities may leave this nil.
+    var pointIDs: [UInt64]? = nil
 
     var pointCount: Int { vertices.count }
 }
@@ -32,15 +35,20 @@ enum LivePointCloudSampler {
 
         let outputCount = min(maximumPoints, confirmedIndices.count)
         var vertices: [ScanVertex] = []
+        var pointIDs: [UInt64] = []
         vertices.reserveCapacity(outputCount)
+        pointIDs.reserveCapacity(outputCount)
         for outputIndex in 0..<outputCount {
             // Include both ends whenever there is room for two points. A prefix
             // would erase the forehead, chin and sides captured later in a scan.
             let rank = outputCount == 1 ? (confirmedIndices.count - 1) / 2
                 : outputIndex * (confirmedIndices.count - 1) / (outputCount - 1)
-            vertices.append(vertexAt(confirmedIndices[rank]))
+            let sourceIndex = confirmedIndices[rank]
+            vertices.append(vertexAt(sourceIndex))
+            pointIDs.append(UInt64(sourceIndex))
         }
         return LivePointCloudSnapshot(revision: revision, vertices: vertices,
-                                      confirmedPointCount: confirmedIndices.count)
+                                      confirmedPointCount: confirmedIndices.count,
+                                      pointIDs: pointIDs)
     }
 }
