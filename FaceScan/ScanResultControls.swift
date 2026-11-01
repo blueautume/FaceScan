@@ -2,7 +2,7 @@ import SwiftUI
 
 /// Result-only sizing. New scans and newly opened originals start at 1×.
 struct ScanPointSizeControl: View {
-    let title: String
+    let title: LocalizedStringKey
     @Binding var scale: Double
 
     var body: some View {
@@ -10,7 +10,7 @@ struct ScanPointSizeControl: View {
             Text(title).fixedSize()
             Slider(value: safeScale, in: 0.25...4, step: 0.05)
                 .accessibilityLabel(title)
-                .accessibilityValue("\(safeScale.wrappedValue, specifier: "%.2f") 倍")
+                .accessibilityValue("\(safeScale.wrappedValue, specifier: "%.2f") times")
                 .accessibilityIdentifier("pointSize.result")
             Menu {
                 ForEach([0.25, 0.5, 1, 1.5, 2, 3, 4], id: \.self) { value in
@@ -30,11 +30,11 @@ struct ScanPointSizeControl: View {
                     .fixedSize()
                     .frame(minHeight: 44)
             }
-            .accessibilityLabel("选择点大小预设")
-            .accessibilityValue("\(safeScale.wrappedValue, specifier: "%.2f") 倍")
-            Button("重置") { scale = 1 }
+            .accessibilityLabel("Choose a point size preset.")
+            .accessibilityValue("\(safeScale.wrappedValue, specifier: "%.2f") times")
+            Button("Reset") { scale = 1 }
                 .frame(minHeight: 44)
-                .accessibilityLabel("恢复默认点大小")
+                .accessibilityLabel("Reset point size to the default.")
         }
         .font(.system(size: 13, weight: .medium))
         .tint(ScanTheme.tint)
@@ -63,8 +63,8 @@ struct ScanResultComparisonButton: View {
                 .contentShape(Circle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(isFiltered ? "查看原始点云" : "查看滤波点云")
-        .accessibilityValue(isFiltered ? "当前为滤波后点云" : "当前为原始点云")
+        .accessibilityLabel(isFiltered ? String(localized: "Show Original") : String(localized: "Show Filtered"))
+        .accessibilityValue(isFiltered ? String(localized: "Showing filtered point cloud.") : String(localized: "Showing original point cloud."))
         .accessibilityAddTraits(isFiltered ? .isSelected : [])
         .accessibilityIdentifier("scan.resultComparison")
     }
@@ -84,16 +84,20 @@ struct ScanFilterActionButton: View {
     var body: some View {
         Button(action: isFiltering ? onCancel : onApply) {
             VStack(spacing: 6) {
-                HStack(spacing: 7) {
-                    Image(systemName: isFiltering ? "xmark" : "camera.filters")
-                    Text(isFiltering ? "滤波中" : "滤波")
+                HStack(spacing: 4) {
                     if isFiltering {
+                        Text("Filtering")
+                        Spacer(minLength: 0)
                         Text("\(percentage)%")
                             .font(.system(size: 12, weight: .medium).monospacedDigit())
                             .contentTransition(.numericText())
+                    } else {
+                        Label("Filter", systemImage: "camera.filters")
                     }
                 }
                 .font(.system(size: 16, weight: .semibold))
+                .fixedSize(horizontal: false, vertical: true)
+                .multilineTextAlignment(.center)
                 if isFiltering {
                     ProgressView(value: fraction)
                         .progressViewStyle(.linear)
@@ -108,9 +112,9 @@ struct ScanFilterActionButton: View {
         .buttonStyle(ScanPrimaryButton())
         .accessibilityElement(children: .ignore)
         .accessibilityAddTraits(.isButton)
-        .accessibilityLabel(isFiltering ? "取消滤波" : "滤波")
-        .accessibilityValue(isFiltering ? "已完成 \(percentage)%" : "")
-        .accessibilityHint(isFiltering ? "正在滤波，点按取消" : "按当前参数处理原始扫描")
+        .accessibilityLabel(isFiltering ? String(localized: "Cancel Filtering") : String(localized: "Filter"))
+        .accessibilityValue(isFiltering ? String(localized: "\(percentage)% complete") : "")
+        .accessibilityHint(isFiltering ? String(localized: "Filtering in progress. Double-tap to cancel.") : String(localized: "Filter the original scan using the current settings."))
         .accessibilityIdentifier("filter.apply")
     }
 }

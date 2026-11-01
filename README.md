@@ -6,6 +6,14 @@
 
 应用显示名称、工程、主 Target 与 Scheme 均为 `FaceScan`。主应用 Bundle ID 为 `top.furby.FaceScan`，测试 Target 为 `FaceScanTests`，测试 Bundle ID 为 `top.furby.FaceScanTests`。
 
+## 中英双语
+
+支持简体中文与英文，跟随 iOS 为本应用选择的语言，其他语言回退为英文。界面、扫描引导、错误提示、隐私说明、相机用途、PLY 类型名称与 VoiceOver 文本均已本地化。`Localizable.xcstrings` 管理应用文案，`InfoPlist.xcstrings` 管理系统显示的用途和类型描述；点、帧、扫描记录与格数提供英文单复数规则，日期、数字和文件大小按地区格式显示。
+
+英文采用简短、自然的操作名称，例如 Start Scan、Filter Settings、Save & Filter；原始扫描使用 original / unfiltered，与参数参考配置 reference 区分。较长参数名和历史信息可换行或上下排列，曲线轴标题放在图外，辅助大字号下预设按钮改为纵排。处理中按钮保留清楚的英文状态、百分比和进度条。
+
+2026-11-01 验证：中、英文分别执行全量 266 项测试，每组 265 项通过、1 项 TrueDepth 真机专用测试跳过；最终 Debug / iOS Release 编译通过。编译器提取的 259 个独立文案 key 全部覆盖，翻译占位符与复数分支匹配。额外生成中英文的 320 / 375 pt 宽度及辅助大字号原生视图截图，检查曲线、长参数、隐私卡片和处理中按钮；iPhone SE 模拟器实际检查了英文隐私卡片和结果页。相机权限文案验证了两种语言的构建资源，未在真实 iPhone 上重新触发权限弹窗。
+
 ## 界面配色
 
 图标使用提供的金色三角面人像原图，完整缩放为 1024 × 1024 不透明资源，由系统处理图标圆角。界面采用固定浅色外观，颜色集中在 `ScanTheme.swift`：
@@ -161,7 +169,7 @@ xcodebuild -project FaceScan.xcodeproj -scheme FaceScan -configuration Release -
 
 已在模拟器通过系统文件 URL 实际启动 FaceScan，成功打开先前保存的含 17,221 点的合成 PLY；选择“暂不使用相机”后仍可查看。再次打开损坏 PLY 时显示错误并保留之前模型。已确认导出会打开可返回上级目录的系统保存面板；在保存面板期间收到外部 PLY 时，面板关闭并显示文档，暂存文件清空，Documents 没有自动新增导出。合成文件不代表实际扫描质量。
 
-Debug 构建可通过 Run Arguments 的 `--sample` 或 `--live-sample` 查看明确标注的合成点云，用于界面检查；`--history-sample` 仅用于显式插入一份固定 ID 的合成历史并打开列表，便于验证重启读取，不会重复创建。仍需同意隐私协议，不会进入真实重建器。正式界面没有示例入口，Release 不启用这些参数。
+Debug 构建可通过 Run Arguments 的 `--sample` 或 `--live-sample` 查看明确标注的合成点云，`--filter-settings-sample` 可直接检查样例的参数页；`--history-sample` 仅用于显式插入一份固定 ID 的合成历史并打开列表，便于验证重启读取，不会重复创建。仍需同意隐私协议，不会进入真实重建器。正式界面没有示例入口，Release 不启用这些参数。
 
 ## 范围
 

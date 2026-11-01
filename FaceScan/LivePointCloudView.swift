@@ -134,15 +134,15 @@ struct LivePointCloudView: UIViewRepresentable {
                 store: poseStore, followsFacePose: isFollowing)
             view.allowsCameraControl = !isFollowing
             if let surfaceMesh {
-                let source = surfaceMesh.isSample ? "合成示例" : "扫描结果"
-                let version = surfaceMesh.isFiltered ? "滤波后点云" : "原始点云"
-                view.accessibilityLabel = "\(source)，\(version)，\(surfaceMesh.vertexCount) 个点，可旋转和缩放"
+                let source = surfaceMesh.isSample ? String(localized: "Sample scan") : String(localized: "Scan result")
+                let version = surfaceMesh.isFiltered ? String(localized: "Filtered point cloud") : String(localized: "Original point cloud")
+                view.accessibilityLabel = String(localized: "\(source). \(version). \(L10n.pointCount(surfaceMesh.vertexCount)). Drag to rotate and pinch to zoom.")
             } else if let snapshot {
-                let source = snapshot.isSample ? "合成示例实时点云" : "实时扫描点云"
-                let interaction = isFollowing ? "随头部移动" : "可旋转和缩放"
-                view.accessibilityLabel = "\(source)，\(snapshot.pointCount) 个点，\(interaction)"
+                let source = snapshot.isSample ? String(localized: "Live sample point cloud") : String(localized: "Live scan point cloud")
+                let interaction = isFollowing ? String(localized: "Follows your head movement.") : String(localized: "Drag to rotate and pinch to zoom.")
+                view.accessibilityLabel = String(localized: "\(source). \(L10n.pointCount(snapshot.pointCount)). \(interaction)")
             } else {
-                view.accessibilityLabel = "实时点云，等待扫描数据"
+                view.accessibilityLabel = String(localized: "Live point cloud. Waiting for scan data.")
             }
 
             let startsAcquisition = animatesAcquisition && !isAcquiring

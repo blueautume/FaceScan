@@ -8,6 +8,14 @@ enum MeshDisplayStyle: String, CaseIterable, Identifiable {
     case points = "点云"
 
     var id: String { rawValue }
+
+    var localizedTitle: String {
+        switch self {
+        case .color: String(localized: "Original Colors")
+        case .clay: String(localized: "Clay")
+        case .points: String(localized: "Point Cloud")
+        }
+    }
 }
 
 /// Displays measured, face-local vertices. Color is per-vertex RGB, not a generated texture.
@@ -25,7 +33,7 @@ struct FaceMeshView: UIViewRepresentable {
         view.allowsCameraControl = true
         view.autoenablesDefaultLighting = false
         view.isJitteringEnabled = true
-        view.accessibilityLabel = mesh.isSample ? "合成示例三维人脸，可旋转和缩放" : "扫描得到的三维人脸，可旋转和缩放"
+        view.accessibilityLabel = mesh.isSample ? String(localized: "Sample 3D face. Drag to rotate and pinch to zoom.") : String(localized: "Scanned 3D face. Drag to rotate and pinch to zoom.")
         context.coordinator.install(in: view)
         context.coordinator.update(mesh: mesh, style: style, in: view)
         return view
@@ -98,7 +106,7 @@ struct FaceMeshView: UIViewRepresentable {
                 faceNode.geometry = geometries[style]
                 displayedStyle = style
             }
-            view.accessibilityLabel = mesh.isSample ? "合成示例三维人脸，可旋转和缩放" : "扫描得到的三维人脸，可旋转和缩放"
+            view.accessibilityLabel = mesh.isSample ? String(localized: "Sample 3D face. Drag to rotate and pinch to zoom.") : String(localized: "Scanned 3D face. Drag to rotate and pinch to zoom.")
         }
 
         private func hasSameGeometry(as mesh: ScanMesh) -> Bool {

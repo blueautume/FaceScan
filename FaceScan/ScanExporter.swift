@@ -25,8 +25,8 @@ enum ScanExporter {
 
         var errorDescription: String? {
             switch self {
-            case .emptyMesh: return "扫描中没有可以导出的顶点。"
-            case .invalidGeometry: return "扫描数据包含无效坐标或三角形。"
+            case .emptyMesh: return String(localized: "This scan has no points to export.")
+            case .invalidGeometry: return String(localized: "This scan contains invalid coordinates or triangles.")
             }
         }
     }

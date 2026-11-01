@@ -14,20 +14,20 @@ struct PrivacyPolicyView: View {
                     .font(.system(size: 25, weight: .medium))
                     .foregroundStyle(ScanTheme.tint)
                     .accessibilityHidden(true)
-                Text("隐私协议")
+                Text("Privacy")
                     .font(.system(size: 25, weight: .semibold))
                     .accessibilityAddTraits(.isHeader)
-                Text("FaceScan，全程在本机处理。")
+                Text("FaceScan processes everything on your device.")
                     .font(.system(size: 14))
                     .foregroundStyle(ScanTheme.secondary)
             }
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 17) {
-                    section("相机与面部数据", text: "点击开始扫描后才使用相机。画面、原深感深度与头部姿态仅在本机重建模型，不用于识别身份，不录制原始画面。打开的 PLY 仅在本机读取与展示，不改写源文件。")
-                    section("本机原始历史", text: "每次扫描成功后，自动在本机保存一份原始点云，保留位置、颜色与扫描信息。滤波不会覆盖历史，可从历史列表重新打开或删除。历史不自动淘汰，排除系统备份；删除或重新安装 App 可能丢失记录，需要长期保留的模型请主动导出。")
-                    section("没有云端交互", text: "无需账号。App 不上传扫描数据，不提供云同步，也不包含广告、分析统计或第三方追踪。协议版本与滤波参数偏好也仅保存在本机。")
-                    section("导出与清除", text: "主动导出时，由你通过系统面板选择保存位置；若选择 iCloud 或其他文件服务，由所选服务处理。撤回同意会停止采集并清除当前模型、全部本机扫描历史与临时文件，已主动导出的文件需自行删除。")
+                    section("Camera & Face Data", text: "The camera is used only after you tap Start Scan. Camera images, TrueDepth depth data, and head pose are processed on your device to build the model. FaceScan does not identify you or record the original camera footage. Imported PLY files are read and displayed locally without changing the source file.")
+                    section("Original Scans on This Device", text: "After each successful scan, FaceScan automatically saves an original point cloud on this device, including its positions, colors, and scan details. Filtering never overwrites the original. You can reopen or delete it in Scan History. Records are not automatically removed and are excluded from system backups. Deleting or reinstalling the app may erase them, so export any models you want to keep.")
+                    section("No Cloud Services", text: "No account is required. FaceScan does not upload scan data or provide cloud sync, and contains no advertising, analytics, or third-party tracking. The privacy agreement version and your filter preferences are also stored only on this device.")
+                    section("Exporting & Clearing Data", text: "When you export a model, you choose where to save it in the system file picker. If you choose iCloud or another file service, that service handles the file. Withdrawing consent stops capture and clears the current model, all scan history on this device, and temporary files. Files you have already exported are not deleted automatically. You can delete them separately.")
                 }
                 .padding(.trailing, 3)
             }
@@ -35,14 +35,15 @@ struct PrivacyPolicyView: View {
 
             VStack(spacing: 12) {
                 Button(action: isAccepted ? onLater : onAccept) {
-                    Text(isAccepted ? "完成" : "同意并继续")
+                    Text(isAccepted ? LocalizedStringKey("Done") : LocalizedStringKey("Agree & Continue"))
                         .font(.system(size: 16, weight: .semibold))
                         .frame(maxWidth: .infinity, minHeight: 50)
                 }
                 .buttonStyle(ScanPrimaryButton())
 
                 Button(action: isAccepted ? onRevoke : onLater) {
-                    Text(isAccepted ? "撤回同意并清除全部扫描" : "暂不使用相机")
+                    Text(isAccepted ? LocalizedStringKey("Withdraw Consent & Clear History")
+                                    : LocalizedStringKey("Continue Without Camera"))
                         .font(.system(size: 13))
                         .foregroundStyle(isAccepted ? ScanTheme.destructive : ScanTheme.secondary)
                         .frame(maxWidth: .infinity, minHeight: 36)
@@ -64,7 +65,7 @@ struct PrivacyPolicyView: View {
         .accessibilityElement(children: .contain)
     }
 
-    private func section(_ title: String, text: String) -> some View {
+    private func section(_ title: LocalizedStringKey, text: LocalizedStringKey) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title)
                 .font(.system(size: 14, weight: .semibold))

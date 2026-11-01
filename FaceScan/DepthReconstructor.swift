@@ -40,12 +40,12 @@ final class DepthReconstructor {
     }
 
     func integrate(frame: ARFrame, face: ARFaceAnchor) -> ScanProgress {
-        guard face.isTracked else { return progress("正在寻找人脸，请看向镜头") }
+        guard face.isTracked else { return progress(String(localized: "Looking for your face. Face the camera.")) }
         if let identifier = trackedFaceIdentifier, identifier != face.identifier {
-            return progress("人脸追踪已更换，请重新扫描以避免混合不同面部", requiresRestart: true)
+            return progress(String(localized: "Face tracking changed. Start a new scan."), requiresRestart: true)
         }
         guard let capturedDepth = frame.capturedDepthData else {
-            return progress("正在等待 TrueDepth 深度画面")
+            return progress(String(localized: "Waiting for TrueDepth data"))
         }
 
         // Color and depth have different frame rates. Do not fuse a stale depth
@@ -53,7 +53,7 @@ final class DepthReconstructor {
         let depthTimestamp = frame.capturedDepthDataTimestamp
         if depthTimestamp > 0 {
             guard abs(frame.timestamp - depthTimestamp) < 0.06 else {
-                return progress("请缓慢转头，正在等待同步深度")
+                return progress(String(localized: "Waiting for synchronized depth data. Turn slowly."))
             }
             if let previous = lastDepthTimestamp, depthTimestamp <= previous {
                 return progress(coverage.nextHint)
@@ -64,10 +64,10 @@ final class DepthReconstructor {
         let cameraInFace = cameraToFace.columns.3.xyz
         let distance = simd_length(cameraInFace)
         guard distance.isFinite, distance >= 0.23 else {
-            return progress("离镜头稍远一些，保持约 30–55 厘米")
+            return progress(String(localized: "Move back to about 30–55 cm"))
         }
         guard distance <= 0.70 else {
-            return progress("靠近一些，让脸占据取景框中央")
+            return progress(String(localized: "Move closer and center your face"))
         }
 
         // Measuring the camera direction in anatomical face axes avoids making
@@ -75,20 +75,20 @@ final class DepthReconstructor {
         let yaw = atan2(cameraInFace.x, cameraInFace.z)
         let pitch = atan2(cameraInFace.y, hypot(cameraInFace.x, cameraInFace.z))
         guard cameraInFace.z > 0, abs(yaw) <= ScanCoverageTracker.maximumYaw else {
-            return progress("转头角度稍小一些，保持面部仍被追踪")
+            return progress(String(localized: "Turn back slightly to keep your face in view"))
         }
         guard abs(pitch) <= ScanCoverageTracker.maximumPitch else {
-            return progress("抬头或低头幅度稍小一些，让额头和下颌保持可见")
+            return progress(String(localized: "Tilt your head less to stay in view"))
         }
         guard neutralExpression(face) else {
-            return progress("请放松表情、闭嘴，眼睛自然睁开")
+            return progress(String(localized: "Relax your face. Keep your mouth closed and eyes open."))
         }
         if let previous = lastPose {
             let elapsed = frame.timestamp - previous.timestamp
             if elapsed > 0, elapsed < 0.6,
                (abs(yaw - previous.yaw) / Float(elapsed) > radians(55)
                 || abs(pitch - previous.pitch) / Float(elapsed) > radians(45)) {
-                return progress("转头慢一点，让深度画面保持稳定")
+                return progress(String(localized: "Turn more slowly for steadier depth data"))
             }
         }
 
@@ -97,37 +97,37 @@ final class DepthReconstructor {
         // normally provides absolute depth; do not silently label a relative
         // estimate as meters on an unsupported capture configuration.
         guard depth.depthDataAccuracy == .absolute else {
-            return progress("当前深度不是绝对距离，无法生成米制扫描")
+            return progress(String(localized: "Absolute depth data is required for a scan in meters."))
         }
         let depthBuffer = depth.depthDataMap
         let imageBuffer = frame.capturedImage
         let width = CVPixelBufferGetWidth(depthBuffer)
         let height = CVPixelBufferGetHeight(depthBuffer)
-        guard width > 2, height > 2 else { return progress("深度画面暂不可用") }
+        guard width > 2, height > 2 else { return progress(String(localized: "Depth frame unavailable")) }
         let depthAspect = Float(width) / Float(height)
         let colorAspect = Float(CVPixelBufferGetWidth(imageBuffer))
             / Float(CVPixelBufferGetHeight(imageBuffer))
         guard abs(depthAspect - colorAspect) < 0.025 else {
             // Scaling mismatched crops without the crop transform would produce
             // plausible-looking but incorrectly registered vertex colors.
-            return progress("当前彩色与深度画面比例不匹配，请重新开始")
+            return progress(String(localized: "Depth and color frames don't match. Start again."))
         }
         guard let projection = DepthProjection(depth: depth, camera: frame.camera,
                                                width: width, height: height) else {
-            return progress("相机校准数据暂不可用")
+            return progress(String(localized: "Camera calibration unavailable"))
         }
         guard CVPixelBufferLockBaseAddress(depthBuffer, .readOnly) == kCVReturnSuccess else {
-            return progress("无法读取深度画面")
+            return progress(String(localized: "Couldn't read the depth frame"))
         }
         defer { CVPixelBufferUnlockBaseAddress(depthBuffer, .readOnly) }
         guard CVPixelBufferLockBaseAddress(imageBuffer, .readOnly) == kCVReturnSuccess else {
-            return progress("无法读取相机颜色")
+            return progress(String(localized: "Couldn't read camera colors"))
         }
         defer { CVPixelBufferUnlockBaseAddress(imageBuffer, .readOnly) }
         guard let depthBase = CVPixelBufferGetBaseAddress(depthBuffer),
               let colors = CameraColors(buffer: imageBuffer),
               let bounds = FaceBounds(geometry: face.geometry) else {
-            return progress("正在准备扫描数据")
+            return progress(String(localized: "Preparing scan data…"))
         }
 
         let depthRowBytes = CVPixelBufferGetBytesPerRow(depthBuffer)
@@ -168,7 +168,7 @@ final class DepthReconstructor {
         }
 
         guard validCount >= 250 else {
-            return progress("有效深度偏少，请调整光线并保持脸在中央")
+            return progress(String(localized: "Not enough depth data. Center your face and improve the lighting."))
         }
 
         trackedFaceIdentifier = face.identifier

@@ -87,10 +87,12 @@ final class PointCloudDisplayControlTests: XCTestCase {
         assertSize(try XCTUnwrap(node.geometry?.elements.first), scale: 3)
         XCTAssertEqual(camera.simdTransform, cameraTransform)
         XCTAssertEqual(node.simdTransform, pose)
-        XCTAssertEqual(view.accessibilityLabel, "扫描结果，滤波后点云，3 个点，可旋转和缩放")
+        XCTAssertTrue(view.accessibilityLabel?.contains(String(localized: "Filtered point cloud")) == true)
+        XCTAssertTrue(view.accessibilityLabel?.contains(L10n.pointCount(3)) == true)
         coordinator.update(snapshot: nil, surfaceMesh: mesh, resultFramingIdentity: mesh.renderIdentity,
                            pointSizeScale: 1, in: view)
-        XCTAssertEqual(view.accessibilityLabel, "扫描结果，滤波后点云，3 个点，可旋转和缩放")
+        XCTAssertTrue(view.accessibilityLabel?.contains(String(localized: "Filtered point cloud")) == true)
+        XCTAssertTrue(view.accessibilityLabel?.contains(L10n.pointCount(3)) == true)
     }
 
     @MainActor

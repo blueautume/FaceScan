@@ -30,15 +30,15 @@ enum PLYImporter {
 
         var errorDescription: String? {
             switch self {
-            case .invalidHeader: "PLY 文件头无效或缺少顶点坐标。"
-            case .unsupportedFormat: "仅支持 PLY 1.0 的 ASCII、二进制小端和二进制大端格式。"
-            case .fileTooLarge: "PLY 文件不能超过 64 MB。"
-            case .tooManyVertices: "PLY 文件最多支持 50 万个顶点。"
-            case .tooComplex: "PLY 文件的面或属性数据过于复杂，无法安全打开。"
-            case .truncated: "PLY 文件不完整，无法读取。"
-            case .invalidValue: "PLY 文件包含无效数值、颜色或额外数据。"
-            case .invalidGeometry: "PLY 文件包含无效坐标或面索引。"
-            case .unreadableFile: "无法读取这个 PLY 文件。"
+            case .invalidHeader: String(localized: "The PLY file has an invalid header or is missing vertex coordinates.")
+            case .unsupportedFormat: String(localized: "Only PLY 1.0 files in ASCII, little-endian binary, or big-endian binary format are supported.")
+            case .fileTooLarge: String(localized: "PLY files must be 64 MB or smaller.")
+            case .tooManyVertices: String(localized: "PLY files can contain up to 500,000 vertices.")
+            case .tooComplex: String(localized: "The face or property data in this PLY file is too complex to open safely.")
+            case .truncated: String(localized: "The PLY file is incomplete and can't be read.")
+            case .invalidValue: String(localized: "The PLY file contains invalid values, colors, or extra data.")
+            case .invalidGeometry: String(localized: "The PLY file contains invalid coordinates or face indices.")
+            case .unreadableFile: String(localized: "Couldn't read this PLY file.")
             }
         }
     }
@@ -63,7 +63,7 @@ enum PLYImporter {
 
     /// Also exposed separately so format validation can be tested without any
     /// document-provider or UI dependencies. Call off the main actor for files.
-    static func parse(_ data: Data, filename: String = "模型.ply") throws -> PLYDocument {
+    static func parse(_ data: Data, filename: String = String(localized: "Model.ply")) throws -> PLYDocument {
         try Task.checkCancellation()
         guard data.count <= maximumFileBytes else { throw ImportError.fileTooLarge }
         return try data.withUnsafeBytes { bytes in

@@ -40,8 +40,9 @@ final class ScanFilterRenderingTests: XCTestCase {
         try assertGeometry(filteredGeometry, matches: filtered.vertices)
         XCTAssertEqual(camera.simdTransform, cameraTransform)
         XCTAssertEqual(node.simdTransform, modelTransform)
-        XCTAssertEqual(view.accessibilityLabel, "扫描结果，滤波后点云，2 个点，可旋转和缩放",
+        XCTAssertTrue(view.accessibilityLabel?.contains(String(localized: "Filtered point cloud")) == true,
                        "The result label must use the displayed mesh rather than the stale live snapshot.")
+        XCTAssertTrue(view.accessibilityLabel?.contains(L10n.pointCount(2)) == true)
 
         coordinator.update(snapshot: snapshot, surfaceMesh: original,
                            resultFramingIdentity: original.renderIdentity, pointSizeScale: 2, in: view)
@@ -52,7 +53,8 @@ final class ScanFilterRenderingTests: XCTestCase {
         try assertGeometry(restoredGeometry, matches: original.vertices)
         XCTAssertEqual(camera.simdTransform, cameraTransform)
         XCTAssertEqual(node.simdTransform, modelTransform)
-        XCTAssertEqual(view.accessibilityLabel, "扫描结果，原始点云，3 个点，可旋转和缩放")
+        XCTAssertTrue(view.accessibilityLabel?.contains(String(localized: "Original point cloud")) == true)
+        XCTAssertTrue(view.accessibilityLabel?.contains(L10n.pointCount(3)) == true)
     }
 
     @MainActor

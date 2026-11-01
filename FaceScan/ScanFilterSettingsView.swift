@@ -6,6 +6,7 @@ struct ScanFilterSettingsView: View {
     @Binding var settings: ScanFilterSettings
     let onApply: () -> Void
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.locale) private var locale
     @State private var lastCurve = ScanFilterSettings.standard.smoothingCurve ?? .featurePreserving
 
     var body: some View {
@@ -21,11 +22,11 @@ struct ScanFilterSettingsView: View {
             .background(ScanTheme.background)
             .foregroundStyle(ScanTheme.primary)
             .tint(ScanTheme.tint)
-            .navigationTitle("滤波参数")
+            .navigationTitle("Filter Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button("重置参数") {
+                    Button(String(localized: "filter.reset", defaultValue: "Reset")) {
                         settings = .standard
                         lastCurve = ScanFilterSettings.standard.smoothingCurve ?? .featurePreserving
                         settings.save()
@@ -34,13 +35,13 @@ struct ScanFilterSettingsView: View {
                     .accessibilityIdentifier("filterSettings.reset")
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("完成") { dismiss() }
+                    Button("Done") { dismiss() }
                 }
             }
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 VStack(spacing: 8) {
                     if !settings.isValid {
-                        Text("请检查参数范围后再应用。")
+                        Text("Check the parameter ranges before applying.")
                             .font(.caption)
                             .foregroundStyle(ScanTheme.destructive)
                     }
@@ -48,7 +49,7 @@ struct ScanFilterSettingsView: View {
                         settings.save()
                         onApply()
                     } label: {
-                        Text("保存并滤波")
+                        Text("Save & Filter")
                             .font(.system(size: 16, weight: .semibold))
                             .frame(maxWidth: .infinity, minHeight: 52)
                     }
@@ -77,22 +78,25 @@ struct ScanFilterSettingsView: View {
 
     private var curveSection: some View {
         Section {
-            Toggle("按起伏控制平滑", isOn: curveEnabled)
+            Toggle("Adaptive Smoothing", isOn: curveEnabled)
+                .fixedSize(horizontal: false, vertical: true)
                 .accessibilityIdentifier("filterSettings.smoothingCurveEnabled")
             if settings.smoothingCurve != nil {
                 ScanSmoothingCurveEditor(curve: curveBinding)
                     .listRowInsets(EdgeInsets(top: 14, leading: 12, bottom: 14, trailing: 12))
-                millimeterSlider("曲线起伏范围", value: curveBinding.maximumVariation,
+                millimeterSlider("Variation Range", value: curveBinding.maximumVariation,
                                  range: 0.5...8, step: 0.25)
-                millimeterSlider("起伏评估半径", value: curveBinding.neighborhoodRadius,
+                millimeterSlider("Neighborhood Radius", value: curveBinding.neighborhoodRadius,
                                  range: 2...8, step: 0.5)
             }
         } header: {
-            Text("平滑强度曲线")
+            Text("Smoothing Curve")
         } footer: {
-            Text(settings.smoothingCurve == nil
-                 ? "开启后可让小起伏区域更平滑，大起伏区域减少平滑。"
-                 : "0% 保留原位置，100% 使用下方几何平滑结果。右端强度用于超出曲线范围的起伏。评估半径决定观察多大邻域；采样不足时保留原位置，可增大评估半径。SOR 删点与颜色去噪另行生效。起伏也可能来自噪声。")
+            if settings.smoothingCurve == nil {
+                Text("Smooth flatter areas more and preserve larger variations.")
+            } else {
+                Text("0% keeps positions; 100% applies full smoothing. The last point also controls larger variations. Where the local surface cannot be estimated, adaptive curves keep the original positions; uniform curves still apply. A larger neighborhood radius may help. Outlier removal and color denoising are independent. Noise can also cause variation.")
+            }
         }
     }
 
@@ -115,122 +119,150 @@ struct ScanFilterSettingsView: View {
 
     private var geometrySection: some View {
         Section {
-            millimeterSlider("网格间距", value: $settings.parameterGridSize, range: 0.5...4, step: 0.25)
+            millimeterSlider("Grid Spacing", value: $settings.parameterGridSize, range: 0.5...4, step: 0.25)
             Stepper(value: $settings.medianWindow, in: 1...31, step: 2) {
-                parameterLabel("中值窗口", value: settings.medianWindow == 1
-                    ? "关闭" : "\(settings.medianWindow) × \(settings.medianWindow)")
+                parameterLabel("Median Window", value: medianWindowValue)
             }
             .accessibilityIdentifier("filterSettings.medianWindow")
             Stepper(value: $settings.minimumMedianObservations,
                     in: 1...max(1, settings.medianWindow * settings.medianWindow)) {
-                parameterLabel("中值最少观测格", value: "\(settings.minimumMedianObservations)")
+                parameterLabel("Min. Cells for Median", value: Text(settings.minimumMedianObservations, format: .number.locale(locale)))
             }
             .disabled(settings.medianWindow == 1)
             .accessibilityIdentifier("filterSettings.minimumMedianObservations")
             Stepper(value: $settings.bilateralIterations, in: 0...32) {
-                parameterLabel("双边滤波次数", value: settings.bilateralIterations == 0
-                    ? "关闭" : "\(settings.bilateralIterations) 次")
+                parameterLabel("Bilateral Passes", value: bilateralPassesValue)
             }
             .accessibilityIdentifier("filterSettings.bilateralIterations")
             Group {
                 Stepper(value: $settings.bilateralHalfWindow, in: 0...15) {
-                    parameterLabel("双边半窗口", value: "\(settings.bilateralHalfWindow) 格")
+                    parameterLabel("Bilateral Half-Window", value: Text(verbatim: cellCount(settings.bilateralHalfWindow)))
                 }
                 .accessibilityIdentifier("filterSettings.bilateralHalfWindow")
-                millimeterSlider("空间 σ", value: $settings.bilateralSpatialSigma, range: 0.25...10, step: 0.25)
-                millimeterSlider("半径差 σ", value: $settings.bilateralRadiusSigma, range: 0.25...15, step: 0.25)
+                millimeterSlider("Spatial σ", value: $settings.bilateralSpatialSigma, range: 0.25...10, step: 0.25)
+                millimeterSlider("Radius Difference σ", value: $settings.bilateralRadiusSigma, range: 0.25...15, step: 0.25)
             }
             .disabled(settings.bilateralIterations == 0)
         } header: {
-            Text("几何平滑")
+            Text("Geometry Smoothing")
         } footer: {
-            Text("保留细节可先减小网格间距、双边次数和半径差 σ。中值窗口设为关闭可减少局部平滑；网格融合仍会改变点的位置。")
+            Text("For finer detail, reduce grid spacing, bilateral passes, or radius difference σ. Turn off median filtering for less smoothing. Grid fusion can still move points unless the smoothing curve keeps them in place.")
         }
     }
 
     private var outlierSection: some View {
         Section {
             Stepper(value: $settings.sorNeighbors, in: 1...1024) {
-                parameterLabel("SOR 邻点数", value: "\(settings.sorNeighbors)")
+                parameterLabel("SOR Neighbors", value: Text(settings.sorNeighbors, format: .number.locale(locale)))
             }
             .accessibilityIdentifier("filterSettings.sorNeighbors")
-            valueSlider("SOR 标准差倍数", value: $settings.sorStandardDeviations,
+            valueSlider("SOR Threshold", value: $settings.sorStandardDeviations,
                         range: 0...8, step: 0.1, unit: "σ")
-            millimeterSlider("最大径向位移", value: $settings.maximumRadialDisplacement,
+            millimeterSlider("Max. Radial Shift", value: $settings.maximumRadialDisplacement,
                              range: 0...40, step: 0.5)
         } header: {
-            Text("删点门限")
+            Text("Outlier Removal")
         } footer: {
-            Text("SOR 标准差倍数越大，删除的孤立点越少。最大径向位移越小，超出门限而被删除的点越多；它不会限制剩余点的平滑强度。")
+            Text("A higher SOR threshold removes fewer outliers. Points that move farther than the radial shift limit are removed, rather than limited to that distance.")
         }
     }
 
     private var colorSection: some View {
         Section {
-            Toggle("颜色去噪", isOn: $settings.filterColors)
+            Toggle("Color Denoising", isOn: $settings.filterColors)
+                .fixedSize(horizontal: false, vertical: true)
                 .accessibilityIdentifier("filterSettings.filterColors")
             if settings.filterColors {
-                millimeterSlider("颜色径向门限", value: $settings.colorRadialGate, range: 0...15, step: 0.25)
-                millimeterSlider("颜色空间 σ", value: $settings.colorSpatialSigma, range: 0.25...8, step: 0.25)
-                valueSlider("RGB 差异 σ", value: $settings.colorRGBSigma, range: 1...100, step: 1, unit: "")
+                millimeterSlider("Color Radial Gate", value: $settings.colorRadialGate, range: 0...15, step: 0.25)
+                millimeterSlider("Color Spatial σ", value: $settings.colorSpatialSigma, range: 0.25...8, step: 0.25)
+                valueSlider("RGB Difference σ", value: $settings.colorRGBSigma, range: 1...100, step: 1, unit: "")
                 Stepper(value: $settings.colorHalfWindow, in: 0...15) {
-                    parameterLabel("颜色半窗口", value: "\(settings.colorHalfWindow) 格")
+                    parameterLabel("Color Half-Window", value: Text(verbatim: cellCount(settings.colorHalfWindow)))
                 }
                 .accessibilityIdentifier("filterSettings.colorHalfWindow")
             }
         } header: {
-            Text("颜色")
+            Text("Color")
         } footer: {
-            Text("关闭后保留来源点的原始 RGB。开启时，较小的颜色空间 σ 和 RGB 差异 σ 有助于保留颜色边缘。")
+            Text("Off keeps source RGB. Lower spatial σ and RGB difference σ help preserve color edges.")
         }
     }
 
     private var coordinateSection: some View {
         Section {
-            DisclosureGroup("柱面坐标（高级）") {
-                millimeterSlider("柱心 X", value: $settings.cylinderCenterX, range: -100...100, step: 1)
-                millimeterSlider("柱心 Z", value: $settings.cylinderCenterZ, range: -150...50, step: 1)
-                millimeterSlider("参考半径", value: $settings.referenceRadius, range: 20...200, step: 1)
+            DisclosureGroup {
+                millimeterSlider("Center X", value: $settings.cylinderCenterX, range: -100...100, step: 1)
+                millimeterSlider("Center Z", value: $settings.cylinderCenterZ, range: -150...50, step: 1)
+                millimeterSlider("Reference Radius", value: $settings.referenceRadius, range: 20...200, step: 1)
+            } label: {
+                Text("Cylindrical Grid (Advanced)")
+                    .fixedSize(horizontal: false, vertical: true)
             }
         } footer: {
-            Text("长度均以毫米显示。柱心和参考半径决定柱面参数化，一般保持默认即可。更细的网格会增加耗时与内存使用。")
+            Text("Lengths are in millimeters. The center and reference radius define the cylindrical grid; usually keep the defaults. Finer grids use more time and memory.")
         }
     }
 
-    private func parameterLabel(_ title: String, value: String) -> some View {
+    private var medianWindowValue: Text {
+        if settings.medianWindow == 1 { return Text("Off") }
+        let count = settings.medianWindow.formatted(.number.locale(locale))
+        return Text(verbatim: "\(count) × \(count)")
+    }
+
+    private var bilateralPassesValue: Text {
+        settings.bilateralIterations == 0 ? Text("Off")
+            : Text(settings.bilateralIterations, format: .number.locale(locale))
+    }
+
+    private func cellCount(_ count: Int) -> String {
+        String(localized: "\(count) cells", locale: locale)
+    }
+
+    private func parameterLabel(_ title: LocalizedStringKey, value: Text) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(title)
-            Text(value)
+                .fixedSize(horizontal: false, vertical: true)
+            value
                 .font(.subheadline.monospacedDigit())
                 .foregroundStyle(ScanTheme.secondary)
         }
         .accessibilityElement(children: .combine)
     }
 
-    private func millimeterSlider(_ title: String, value: Binding<Double>,
+    private func millimeterSlider(_ title: LocalizedStringKey, value: Binding<Double>,
                                   range: ClosedRange<Double>, step: Double) -> some View {
         let millimeters = Binding(get: { value.wrappedValue * 1_000 },
                                   set: { value.wrappedValue = $0 / 1_000 })
         return valueSlider(title, value: millimeters, range: range, step: step, unit: "mm")
     }
 
-    private func valueSlider(_ title: String, value: Binding<Double>,
+    private func valueSlider(_ title: LocalizedStringKey, value: Binding<Double>,
                              range: ClosedRange<Double>, step: Double, unit: String) -> some View {
         // Valid settings restored from storage may lie outside the usual slider
         // range. Include that value without silently changing it on presentation.
         let visibleRange = min(range.lowerBound, value.wrappedValue)...max(range.upperBound, value.wrappedValue)
+        let number = value.wrappedValue.formatted(.number.precision(.fractionLength(step < 1 ? 2 : 0)).locale(locale))
+        let displayValue = unit.isEmpty ? number : "\(number) \(unit)"
         return VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text(title)
-                Spacer(minLength: 8)
-                Text("\(value.wrappedValue, specifier: step < 1 ? "%.2f" : "%.0f")\(unit.isEmpty ? "" : " \(unit)")")
-                    .font(.subheadline.monospacedDigit())
-                    .foregroundStyle(ScanTheme.secondary)
-                    .fixedSize()
+            ViewThatFits(in: .horizontal) {
+                HStack {
+                    Text(title).fixedSize()
+                    Spacer(minLength: 8)
+                    Text(verbatim: displayValue)
+                        .font(.subheadline.monospacedDigit())
+                        .foregroundStyle(ScanTheme.secondary)
+                        .fixedSize()
+                }
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title).fixedSize(horizontal: false, vertical: true)
+                    Text(verbatim: displayValue)
+                        .font(.subheadline.monospacedDigit())
+                        .foregroundStyle(ScanTheme.secondary)
+                }
             }
             Slider(value: value, in: visibleRange, step: step)
                 .accessibilityLabel(title)
-                .accessibilityValue("\(value.wrappedValue, specifier: "%.2f") \(unit)")
+                .accessibilityValue(Text(verbatim: displayValue))
         }
         .padding(.vertical, 4)
     }

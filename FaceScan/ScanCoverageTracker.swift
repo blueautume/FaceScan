@@ -14,7 +14,7 @@ struct ScanCoverageTracker: Sendable {
 
     var nextHint: String {
         guard let next = ScanAngle.allCases.first(where: { !coveredAngles.contains($0) }) else {
-            return "视角已覆盖，可继续补扫或停止"
+            return String(localized: "All views covered. Keep scanning or stop.")
         }
         return next.guidance
     }

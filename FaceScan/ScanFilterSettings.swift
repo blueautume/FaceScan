@@ -59,10 +59,10 @@ struct ScanFilterSettings: Codable, Equatable, Sendable {
     }()
 
     var presetName: String {
-        if self == .standard { return "默认" }
-        if self == .gentle { return "轻度" }
-        if self == .reference { return "参考参数" }
-        return "自定义"
+        if self == .standard { return String(localized: "Default") }
+        if self == .gentle { return String(localized: "Gentle") }
+        if self == .reference { return String(localized: "Reference") }
+        return String(localized: "Custom")
     }
 
     var configuration: FaceCloudConfiguration {

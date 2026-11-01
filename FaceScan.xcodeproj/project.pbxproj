@@ -140,7 +140,7 @@
 				};
 			};
 			buildConfigurationList = FD0000000000000000000030 /* Build configuration list for PBXProject "FaceScan" */;
-			developmentRegion = "zh-Hans";
+			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
 				"zh-Hans",
@@ -220,6 +220,7 @@
 				ONLY_ACTIVE_ARCH = YES;
 				SDKROOT = iphoneos;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 				SWIFT_VERSION = 5.0;
 			};
@@ -235,6 +236,7 @@
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				SDKROOT = iphoneos;
 				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_OPTIMIZATION_LEVEL = "-O";
 				SWIFT_VERSION = 5.0;
 				VALIDATE_PRODUCT = YES;
@@ -251,7 +253,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Configuration/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = FaceScan;
-				INFOPLIST_KEY_NSCameraUsageDescription = "使用前置原深感摄像头采集面部深度，在本机生成可旋转的三维面容。";
+				INFOPLIST_KEY_NSCameraUsageDescription = "FaceScan uses the front TrueDepth camera to create a 3D scan of your face. Scans are processed on your device.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;
@@ -280,7 +282,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Configuration/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = FaceScan;
-				INFOPLIST_KEY_NSCameraUsageDescription = "使用前置原深感摄像头采集面部深度，在本机生成可旋转的三维面容。";
+				INFOPLIST_KEY_NSCameraUsageDescription = "FaceScan uses the front TrueDepth camera to create a 3D scan of your face. Scans are processed on your device.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = UIInterfaceOrientationPortrait;

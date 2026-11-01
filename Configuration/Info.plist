@@ -6,7 +6,7 @@
     <array>
         <dict>
             <key>CFBundleTypeName</key>
-            <string>PLY 模型</string>
+            <string>PLY Model</string>
             <key>CFBundleTypeRole</key>
             <string>Viewer</string>
             <key>LSHandlerRank</key>
@@ -24,7 +24,7 @@
             <key>UTTypeIdentifier</key>
             <string>top.furby.facescan.ply</string>
             <key>UTTypeDescription</key>
-            <string>PLY 模型</string>
+            <string>PLY Model</string>
             <key>UTTypeConformsTo</key>
             <array>
                 <string>public.data</string>

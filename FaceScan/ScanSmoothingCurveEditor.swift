@@ -7,44 +7,61 @@ struct ScanSmoothingCurveEditor: View {
     @State private var selectedKnot = 2
     @State private var draggingKnot: Int?
     @State private var dragStartStrength = 0.0
+    @Environment(\.locale) private var locale
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @ScaledMetric(relativeTo: .caption) private var graphHeight = 210.0
+    @ScaledMetric(relativeTo: .caption) private var graphLeadingInset = 38.0
+    @ScaledMetric(relativeTo: .caption) private var graphTrailingInset = 22.0
+    @ScaledMetric(relativeTo: .caption) private var graphBottomInset = 24.0
 
     private let fractions = [0.0, 0.25, 0.5, 0.75, 1.0]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("拖动控制点或轻点图内，调整平滑强度")
+            Text("Drag a point or tap the graph to adjust smoothing.")
                 .font(.caption)
                 .foregroundStyle(ScanTheme.secondary)
+                .fixedSize(horizontal: false, vertical: true)
 
-            graph
-                .frame(height: 250)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Smoothing (%)")
+                    .font(.caption)
+                    .foregroundStyle(ScanTheme.secondary)
+                graph.frame(height: graphHeight)
+                Text("Surface Variation (mm)")
+                    .font(.caption)
+                    .foregroundStyle(ScanTheme.secondary)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+            }
 
-            HStack {
-                Text("起伏 \(fractions[selectedKnot] * curve.maximumVariation * 1_000, specifier: "%.2f") mm")
-                Spacer()
-                Text("平滑 \(Int((strength(at: selectedKnot) * 100).rounded()))%")
+            ViewThatFits(in: .horizontal) {
+                HStack {
+                    variationSummary.fixedSize()
+                    Spacer(minLength: 8)
+                    smoothingSummary.fixedSize()
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    variationSummary
+                    smoothingSummary
+                }
             }
             .font(.subheadline.monospacedDigit())
             .foregroundStyle(ScanTheme.secondary)
             Slider(value: selectedStrength, in: 0...1, step: 0.01)
-                .accessibilityLabel("选中控制点的平滑强度")
-                .accessibilityValue("\(Int((strength(at: selectedKnot) * 100).rounded()))%")
+                .accessibilityLabel("Smoothing for Selected Point")
+                .accessibilityValue(Text(verbatim: percentage(strength(at: selectedKnot))))
                 .accessibilityIdentifier("smoothingCurve.selectedStrength")
 
-            HStack(spacing: 8) {
-                shapeButton("保留起伏", strengths: FaceCloudSmoothingCurve.featurePreserving.strengths)
-                shapeButton("统一平滑", strengths: Array(repeating: 1, count: 5))
-                shapeButton("不移动", strengths: Array(repeating: 0, count: 5))
-            }
-            .font(.caption)
+            curvePresets.font(.caption)
         }
         .tint(ScanTheme.tint)
     }
 
     private var graph: some View {
         GeometryReader { geometry in
-            let rect = CGRect(x: 38, y: 30, width: max(1, geometry.size.width - 60),
-                              height: max(1, geometry.size.height - 72))
+            let rect = CGRect(x: graphLeadingInset, y: 10,
+                              width: max(1, geometry.size.width - graphLeadingInset - graphTrailingInset),
+                              height: max(1, geometry.size.height - graphBottomInset - 10))
             ZStack(alignment: .topLeading) {
                 Path { path in
                     for fraction in fractions {
@@ -68,24 +85,23 @@ struct ScanSmoothingCurveEditor: View {
                     .stroke(ScanTheme.tint, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
                     .accessibilityHidden(true)
 
-                Text("平滑强度 (%)")
-                    .font(.caption)
-                    .foregroundStyle(ScanTheme.secondary)
-                    .position(x: rect.minX + 46, y: 8)
-
                 ForEach([0, 50, 100], id: \.self) { percent in
-                    Text("\(percent)")
+                    Text(percent, format: .number.locale(locale))
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(ScanTheme.secondary)
-                        .frame(width: 30, alignment: .trailing)
-                        .position(x: 15, y: rect.maxY - rect.height * Double(percent) / 100)
+                        .frame(width: graphLeadingInset - 8, alignment: .trailing)
+                        .position(x: (graphLeadingInset - 8) / 2,
+                                  y: rect.maxY - rect.height * Double(percent) / 100)
                 }
 
                 ForEach(0..<fractions.count, id: \.self) { index in
-                    Text("\(fractions[index] * curve.maximumVariation * 1_000, specifier: "%.1f")")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(ScanTheme.secondary)
-                        .position(x: rect.minX + rect.width * fractions[index], y: rect.maxY + 14)
+                    if !dynamicTypeSize.isAccessibilitySize || index == 0 || index == fractions.count - 1 {
+                        Text(verbatim: number(fractions[index] * curve.maximumVariation * 1_000, digits: 1))
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(ScanTheme.secondary)
+                            .position(x: rect.minX + rect.width * fractions[index],
+                                      y: rect.maxY + graphBottomInset / 2)
+                    }
 
                     Circle()
                         .fill(selectedKnot == index ? ScanTheme.tint : ScanTheme.card)
@@ -111,9 +127,9 @@ struct ScanSmoothingCurveEditor: View {
                                 .onEnded { _ in draggingKnot = nil }
                         )
                         .accessibilityElement()
-                        .accessibilityLabel("起伏 \(fractions[index] * curve.maximumVariation * 1_000, specifier: "%.2f") 毫米控制点")
-                        .accessibilityValue("平滑 \(Int((strength(at: index) * 100).rounded()))%")
-                        .accessibilityHint("上下轻扫调整强度，或使用下方滑块")
+                        .accessibilityLabel("Control Point at \(number(fractions[index] * curve.maximumVariation * 1_000, digits: 2)) mm Variation")
+                        .accessibilityValue("Smoothing \(percentage(strength(at: index)))")
+                        .accessibilityHint("Swipe up or down to adjust, or use the slider below.")
                         .accessibilityAdjustableAction { direction in
                             selectedKnot = index
                             switch direction {
@@ -126,10 +142,6 @@ struct ScanSmoothingCurveEditor: View {
                         .accessibilityIdentifier("smoothingCurve.knot\(index)")
                 }
 
-                Text("局部起伏 (mm)")
-                    .font(.caption)
-                    .foregroundStyle(ScanTheme.secondary)
-                    .position(x: rect.maxX - 45, y: rect.maxY + 35)
             }
             .contentShape(Rectangle())
             .simultaneousGesture(
@@ -149,7 +161,42 @@ struct ScanSmoothingCurveEditor: View {
             .coordinateSpace(name: "smoothingCurvePlot")
         }
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("局部起伏与平滑强度曲线")
+        .accessibilityLabel("Variation and Smoothing Curve")
+    }
+
+    private var variationSummary: Text {
+        Text("Variation \(number(fractions[selectedKnot] * curve.maximumVariation * 1_000, digits: 2)) mm")
+    }
+
+    private var smoothingSummary: Text {
+        Text("Smoothing \(percentage(strength(at: selectedKnot)))")
+    }
+
+    @ViewBuilder
+    private var curvePresets: some View {
+        if dynamicTypeSize.isAccessibilitySize {
+            VStack(spacing: 8) { presetButtons }
+        } else {
+            HStack(spacing: 8) { presetButtons }
+        }
+    }
+
+    @ViewBuilder
+    private var presetButtons: some View {
+        shapeButton("Keep Detail", accessibilityLabel: "Keep Detail Curve",
+                    strengths: FaceCloudSmoothingCurve.featurePreserving.strengths)
+        shapeButton("Smooth All", accessibilityLabel: "Smooth All Curve",
+                    strengths: Array(repeating: 1, count: 5))
+        shapeButton("No Shift", accessibilityLabel: "No Shift Curve",
+                    strengths: Array(repeating: 0, count: 5))
+    }
+
+    private func number(_ value: Double, digits: Int) -> String {
+        value.formatted(.number.precision(.fractionLength(digits)).grouping(.never).locale(locale))
+    }
+
+    private func percentage(_ value: Double) -> String {
+        value.formatted(.percent.precision(.fractionLength(0)).locale(locale))
     }
 
     private var selectedStrength: Binding<Double> {
@@ -186,14 +233,17 @@ struct ScanSmoothingCurveEditor: View {
         return path
     }
 
-    private func shapeButton(_ title: String, strengths: [Double]) -> some View {
+    private func shapeButton(_ title: LocalizedStringKey, accessibilityLabel: LocalizedStringKey,
+                             strengths: [Double]) -> some View {
         Button {
             curve.strengths = strengths
         } label: {
             Text(title)
-                .frame(maxWidth: .infinity, minHeight: 28)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, minHeight: 36)
         }
         .buttonStyle(.bordered)
-        .accessibilityLabel("曲线预设：\(title)")
+        .accessibilityLabel(accessibilityLabel)
     }
 }

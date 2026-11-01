@@ -2,11 +2,12 @@ import SwiftUI
 import UIKit
 
 /// Lists immutable original scans. Opening an entry returns it to the same
-/// result workspace, where filtering and display enhancement remain copies.
+/// result workspace, where filtering never changes the stored original.
 struct ScanHistoryView: View {
     @ObservedObject var history: ScanHistoryStore
     let onOpen: (ScanHistoryEntry) -> Void
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.locale) private var locale
     @State private var pendingDeletion: ScanHistoryEntry?
     @State private var confirmsClearAll = false
 
@@ -16,7 +17,7 @@ struct ScanHistoryView: View {
                 statusSection
                 recordsSection
                 Section {
-                    Text("扫描成功后自动保存一份原始点云，滤波不会覆盖它。历史仅存于本机，不自动淘汰；删除 App 会移除这些记录，请主动导出需要长期保留的模型。")
+                    Text("Each successful scan is automatically saved as an original point cloud. Filtering never overwrites it. Scan History stays on this device and records are not automatically removed. Deleting the app removes these records, so export any models you want to keep.")
                         .font(.footnote)
                         .foregroundStyle(ScanTheme.secondary)
                         .listRowBackground(ScanTheme.card)
@@ -26,17 +27,17 @@ struct ScanHistoryView: View {
             .background(ScanTheme.background)
             .foregroundStyle(ScanTheme.primary)
             .tint(ScanTheme.tint)
-            .navigationTitle("扫描历史")
+            .navigationTitle("Scan History")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button("全部删除", role: .destructive) { confirmsClearAll = true }
+                    Button("Delete All", role: .destructive) { confirmsClearAll = true }
                         .foregroundStyle(ScanTheme.destructive)
                         .disabled(history.entries.isEmpty || history.isSaving || history.isClearing)
                         .accessibilityIdentifier("history.clearAll")
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("完成") { dismiss() }
+                    Button("Done") { dismiss() }
                 }
             }
             .refreshable {
@@ -44,26 +45,26 @@ struct ScanHistoryView: View {
                 await history.waitUntilIdle()
             }
             .onAppear { history.refresh() }
-            .confirmationDialog("永久删除这份原始扫描？", isPresented: Binding(
+            .confirmationDialog("Permanently delete this original scan?", isPresented: Binding(
                 get: { pendingDeletion != nil },
                 set: { if !$0 { pendingDeletion = nil } }
             ), titleVisibility: .visible) {
                 if let entry = pendingDeletion {
-                    Button("永久删除", role: .destructive) {
+                    Button("Permanently Delete", role: .destructive) {
                         history.delete(entry)
                         pendingDeletion = nil
                     }
                 }
-                Button("取消", role: .cancel) { pendingDeletion = nil }
+                Button("Cancel", role: .cancel) { pendingDeletion = nil }
             } message: {
-                Text("这份历史记录将从本机移除，无法恢复。已导出的 PLY 文件不受影响。")
+                Text("This history record will be removed from this device and cannot be recovered. Exported PLY files are not affected.")
             }
-            .confirmationDialog("永久删除全部扫描历史？", isPresented: $confirmsClearAll,
+            .confirmationDialog("Permanently delete all scan history?", isPresented: $confirmsClearAll,
                                 titleVisibility: .visible) {
-                Button("永久删除全部历史", role: .destructive) { history.clearAll() }
-                Button("取消", role: .cancel) {}
+                Button("Permanently Delete All", role: .destructive) { history.clearAll() }
+                Button("Cancel", role: .cancel) {}
             } message: {
-                Text("本机保存的所有原始扫描都会被移除，无法恢复。已导出的 PLY 文件不受影响。")
+                Text("All original scans saved on this device will be removed and cannot be recovered. Exported PLY files are not affected.")
             }
         }
     }
@@ -74,24 +75,24 @@ struct ScanHistoryView: View {
             || history.hasFailedSaves || history.errorMessage != nil {
             Section {
                 if history.isClearing {
-                    ProgressView("正在清除历史…")
+                    ProgressView("Clearing history…")
                 } else if history.isSaving {
-                    ProgressView("正在保存原始扫描…")
+                    ProgressView("Saving original scan…")
                 } else if history.isLoading {
-                    ProgressView("正在读取历史…")
+                    ProgressView("Loading history…")
                 }
                 if history.errorMessage != nil || history.hasFailedSaves {
-                    Text(history.errorMessage ?? "有原始扫描尚未保存，请重试保存。")
+                    Text(history.errorMessage ?? String(localized: "Some original scans haven't been saved. Try saving again."))
                         .font(.footnote)
                         .foregroundStyle(ScanTheme.destructive)
                     HStack {
-                        Button(history.hasFailedSaves ? "重试保存" : "重新读取") {
+                        Button(history.hasFailedSaves ? LocalizedStringKey("Retry Save") : LocalizedStringKey("Reload")) {
                             if history.hasFailedSaves { history.retryFailedSaves() }
                             else { history.refresh() }
                         }
                         .disabled(history.isSaving || history.isClearing)
                         Spacer()
-                        Button("关闭提示") { history.errorMessage = nil }
+                        Button("Dismiss") { history.errorMessage = nil }
                             .foregroundStyle(ScanTheme.secondary)
                     }
                 }
@@ -104,8 +105,8 @@ struct ScanHistoryView: View {
     private var recordsSection: some View {
         if history.entries.isEmpty {
             Section {
-                ContentUnavailableView("暂无历史记录", systemImage: "clock",
-                                       description: Text("成功扫描后会自动保存原始点云。"))
+                ContentUnavailableView("No Scan History", systemImage: "clock",
+                                       description: Text("Original point clouds are saved automatically after a successful scan."))
                     .listRowBackground(ScanTheme.card)
                     .accessibilityIdentifier("history.empty")
             }
@@ -117,18 +118,18 @@ struct ScanHistoryView: View {
                         .disabled(history.isLoading || history.isClearing)
                         .accessibilityIdentifier("history.entry.\(entry.id.uuidString)")
                         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                            Button("删除", role: .destructive) { pendingDeletion = entry }
+                            Button("Delete", role: .destructive) { pendingDeletion = entry }
                                 .disabled(history.isSaving || history.isClearing)
                         }
                         .contextMenu {
-                            Button("打开原始扫描", systemImage: "arrow.up.forward.app") { onOpen(entry) }
-                            Button("删除", systemImage: "trash", role: .destructive) { pendingDeletion = entry }
+                            Button("Open Original Scan", systemImage: "arrow.up.forward.app") { onOpen(entry) }
+                            Button("Delete", systemImage: "trash", role: .destructive) { pendingDeletion = entry }
                                 .disabled(history.isSaving || history.isClearing)
                         }
                         .listRowBackground(ScanTheme.card)
                 }
             } header: {
-                Text("\(history.entries.count) 份原始扫描 · 最新在前")
+                Text(L10n.scanCount(history.entries.count, locale: locale)) + Text(verbatim: " · ") + Text("Newest First")
             }
         }
     }
@@ -137,19 +138,41 @@ struct ScanHistoryView: View {
         HStack(spacing: 12) {
             ScanHistoryThumbnail(entry: entry, history: history)
             VStack(alignment: .leading, spacing: 6) {
-                Text(entry.createdAt.formatted(date: .numeric, time: .standard))
+                Text(entry.createdAt.formatted(Date.FormatStyle(date: .numeric, time: .shortened).locale(locale)))
                     .font(.system(size: 14, weight: .medium))
                     .foregroundStyle(ScanTheme.primary)
                     .lineLimit(2)
-                Text("\(entry.vertexCount) 点 · \(entry.frameCount) 帧 · \(entry.coveredAngles.count)/\(ScanAngle.allCases.count) 视角")
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 6) {
+                        Text(L10n.pointCount(entry.vertexCount, locale: locale))
+                        Text(verbatim: "·")
+                        Text(L10n.frameCount(entry.frameCount, locale: locale))
+                    }
+                    .fixedSize(horizontal: true, vertical: false)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(L10n.pointCount(entry.vertexCount, locale: locale))
+                        Text(L10n.frameCount(entry.frameCount, locale: locale))
+                    }
+                }
                     .font(.system(size: 12).monospacedDigit())
                     .foregroundStyle(ScanTheme.secondary)
-                HStack(spacing: 8) {
-                    Text(entry.isSample ? "合成示例 · 非真实扫描" : "原始扫描")
-                    Text(ByteCountFormatter.string(fromByteCount: Int64(entry.byteCount), countStyle: .file))
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 8) {
+                        Text("Views: \(entry.coveredAngles.count) / \(ScanAngle.allCases.count)")
+                        Text(Int64(entry.byteCount).formatted(.byteCount(style: .file).locale(locale)))
+                    }
+                    .fixedSize(horizontal: true, vertical: false)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Views: \(entry.coveredAngles.count) / \(ScanAngle.allCases.count)")
+                        Text(Int64(entry.byteCount).formatted(.byteCount(style: .file).locale(locale)))
+                    }
                 }
-                .font(.system(size: 11))
+                .font(.system(size: 12))
                 .foregroundStyle(ScanTheme.secondary)
+                Text(entry.isSample ? LocalizedStringKey("Sample — Not a Real Scan") : LocalizedStringKey("Original Scan"))
+                    .font(.system(size: 12))
+                    .foregroundStyle(ScanTheme.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             Image(systemName: "chevron.right")
@@ -160,7 +183,7 @@ struct ScanHistoryView: View {
         .padding(.vertical, 6)
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
-        .accessibilityHint("打开原始点云，可重新滤波或导出。")
+        .accessibilityHint("Open the original point cloud to filter or export it.")
     }
 }
 

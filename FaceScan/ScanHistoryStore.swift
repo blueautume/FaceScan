@@ -84,7 +84,7 @@ final class ScanHistoryStore: ObservableObject {
                 if !store.hasFailedSaves { store.errorMessage = nil }
             } catch {
                 guard store.generation == epoch, store.refreshGeneration == request else { return }
-                store.errorMessage = "无法读取历史记录：\(error.localizedDescription)"
+                store.errorMessage = String(localized: "Couldn't load Scan History: \(error.localizedDescription)")
             }
             store.isLoading = false
         }
@@ -188,7 +188,7 @@ final class ScanHistoryStore: ObservableObject {
         discardThumbnail(entry.id)
         enqueue { store in
             guard store.generation == epoch else { return }
-            let background = ScanHistoryBackgroundActivity(name: "删除扫描历史")
+            let background = ScanHistoryBackgroundActivity(name: "Delete scan history")
             defer { background.end() }
             do {
                 try await store.operations.delete(entry)
@@ -198,7 +198,7 @@ final class ScanHistoryStore: ObservableObject {
                 if !store.hasFailedSaves { store.errorMessage = nil }
             } catch {
                 guard store.generation == epoch else { return }
-                store.errorMessage = "无法删除这份历史记录：\(error.localizedDescription)"
+                store.errorMessage = String(localized: "Couldn't delete this history record: \(error.localizedDescription)")
             }
             store.deletingThumbnailIDs.remove(entry.id)
         }
@@ -219,14 +219,14 @@ final class ScanHistoryStore: ObservableObject {
         updateSaveState()
         enqueue { store in
             guard store.generation == epoch else { return }
-            let background = ScanHistoryBackgroundActivity(name: "清除扫描历史")
+            let background = ScanHistoryBackgroundActivity(name: "Clear scan history")
             defer { background.end() }
             do {
                 try await store.operations.deleteAll()
                 guard store.generation == epoch else { return }
             } catch {
                 guard store.generation == epoch else { return }
-                store.errorMessage = "无法清除全部历史记录：\(error.localizedDescription)"
+                store.errorMessage = String(localized: "Couldn't clear Scan History: \(error.localizedDescription)")
                 // Reflect any files that survived a partial filesystem failure.
                 if let remaining = try? await store.operations.list(), store.generation == epoch {
                     store.entries = Self.sorted(remaining)
@@ -257,7 +257,7 @@ final class ScanHistoryStore: ObservableObject {
         let epoch = pendingSave.generation
         enqueue { store in
             guard store.generation == epoch, let request = store.pending[id], request.isQueued else { return }
-            let background = ScanHistoryBackgroundActivity(name: "保存原始扫描历史")
+            let background = ScanHistoryBackgroundActivity(name: "Save original scan history")
             defer { background.end() }
             do {
                 let entry = try await store.operations.save(request.mesh, id, request.date)
@@ -272,7 +272,7 @@ final class ScanHistoryStore: ObservableObject {
                 guard store.generation == epoch else { return }
                 store.pending[id]?.isQueued = false
                 store.updateSaveState()
-                store.errorMessage = "原始扫描未能保存到历史：\(error.localizedDescription)。请重试保存。"
+                store.errorMessage = String(localized: "Couldn't save the original scan to Scan History: \(error.localizedDescription)\nTry saving again.")
             }
         }
     }

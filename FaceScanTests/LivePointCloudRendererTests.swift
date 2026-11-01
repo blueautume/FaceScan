@@ -158,7 +158,7 @@ final class LivePointCloudRendererTests: XCTestCase {
         XCTAssertFalse(node.geometry === firstGeometry)
         XCTAssertEqual(node.geometry?.elements.first?.primitiveCount, 2)
         XCTAssertEqual(camera.simdTransform, userCameraTransform, "New points must not override orbit or zoom.")
-        XCTAssertTrue(view.accessibilityLabel?.contains("2 个点") == true)
+        XCTAssertTrue(view.accessibilityLabel?.contains(L10n.pointCount(2)) == true)
 
         coordinator.update(snapshot: nil, in: view)
         await coordinator.waitForPendingUpdates()

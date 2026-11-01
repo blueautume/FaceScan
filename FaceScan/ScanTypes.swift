@@ -43,13 +43,13 @@ enum ScanAngle: String, CaseIterable, Sendable {
 
     var label: String {
         switch self {
-        case .center: "正面"
-        case .left: "左侧"
-        case .farLeft: "左外侧"
-        case .right: "右侧"
-        case .farRight: "右外侧"
-        case .forehead: "额头"
-        case .chin: "下颌"
+        case .center: String(localized: "Front")
+        case .left: String(localized: "Left")
+        case .farLeft: String(localized: "Far Left")
+        case .right: String(localized: "Right")
+        case .farRight: String(localized: "Far Right")
+        case .forehead: String(localized: "Forehead")
+        case .chin: String(localized: "Chin")
         }
     }
 
@@ -67,13 +67,13 @@ enum ScanAngle: String, CaseIterable, Sendable {
 
     var guidance: String {
         switch self {
-        case .center: "正对镜头，保持自然表情"
-        case .left: "慢慢向一侧转头约 20°，停留片刻"
-        case .farLeft: "继续向同一侧转头约 40°，停留片刻"
-        case .right: "回到正面，再向另一侧转头约 20°"
-        case .farRight: "继续向另一侧转头约 40°，停留片刻"
-        case .forehead: "回到正面，轻轻低头，补扫额头"
-        case .chin: "轻轻抬头，补扫下颌"
+        case .center: String(localized: "Face the camera and relax")
+        case .left: String(localized: "Slowly turn 20° to one side and hold")
+        case .farLeft: String(localized: "Turn farther to about 40° and hold")
+        case .right: String(localized: "Face forward, then turn 20° the other way")
+        case .farRight: String(localized: "Turn farther to about 40° and hold")
+        case .forehead: String(localized: "Face forward, then lower your chin")
+        case .chin: String(localized: "Gently lift your chin")
         }
     }
 }

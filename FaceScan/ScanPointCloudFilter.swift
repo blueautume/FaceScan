@@ -21,9 +21,9 @@ enum ScanPointCloudFilter {
 
         var errorDescription: String? {
             switch self {
-            case .emptyMesh: "扫描中没有可以滤波的点。"
-            case .invalidVertex(let index): "第 \(index + 1) 个点包含无效坐标或颜色，无法滤波。"
-            case .emptyResult: "滤波后没有可显示的点，请保留原始结果并重新扫描。"
+            case .emptyMesh: String(localized: "This scan has no points to filter.")
+            case .invalidVertex(let index): String(localized: "Point \(index + 1) has invalid coordinates or colors and can't be filtered.")
+            case .emptyResult: String(localized: "Filtering produced no usable points. Your original scan is unchanged. Try gentler filter settings or scan again.")
             }
         }
     }

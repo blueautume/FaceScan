@@ -14,7 +14,7 @@ struct ContentView: View {
     @State private var exportGeneration = UUID()
     @State private var savedNotice = false
     @State private var exportURL: URL?
-    @State private var errorTitle = "无法导出"
+    @State private var errorTitle = String(localized: "Couldn't Export")
     @State private var hasEnteredCapture = false
     @State private var wantsToScan = false
     @State private var choosingFile = false
@@ -93,7 +93,7 @@ struct ContentView: View {
                     }
                 }
                 .disabled(exporting || openingFile)
-                .accessibilityLabel("扫描历史")
+                .accessibilityLabel("Scan History")
                 .accessibilityIdentifier("history.open")
                 Button {
                     wantsToScan = false
@@ -108,7 +108,7 @@ struct ContentView: View {
                         .foregroundStyle(ScanTheme.secondary)
                 }
                 .disabled(exporting || openingFile)
-                .accessibilityLabel("打开 PLY 文件")
+                .accessibilityLabel("Open PLY File")
                 Button {
                     showsPrivacy = true
                 } label: {
@@ -117,7 +117,7 @@ struct ContentView: View {
                         .frame(width: 44, height: 44)
                         .foregroundStyle(ScanTheme.secondary)
                 }
-                .accessibilityLabel("隐私协议")
+                .accessibilityLabel("Privacy Policy")
             }
 
             stage
@@ -201,7 +201,7 @@ struct ContentView: View {
                 if let url = urls.first { openFile(url) }
                 else { restoreCapture() }
             case .failure(let error):
-                errorTitle = "无法打开 PLY"
+                errorTitle = String(localized: "Couldn't Open PLY")
                 exportError = error.localizedDescription
                 restoreCapture()
             }
@@ -244,16 +244,20 @@ struct ContentView: View {
             get: { activeErrorMessage != nil },
             set: { if !$0 { clearErrors() } }
         )) {
-            if activeErrorTitle == "历史记录", history.hasFailedSaves {
-                Button("重试保存") { history.retryFailedSaves(); clearErrors() }
+            if isHistoryError, history.hasFailedSaves {
+                Button("Retry Saving") { history.retryFailedSaves(); clearErrors() }
             }
-            Button("好", role: .cancel) { clearErrors() }
-        } message: { Text(activeErrorMessage ?? "请重试。") }
+            Button("OK", role: .cancel) { clearErrors() }
+        } message: { Text(activeErrorMessage ?? String(localized: "Please try again.")) }
+    }
+
+    private var isHistoryError: Bool {
+        scanFilter.errorMessage == nil && exportError == nil && history.errorMessage != nil && !showsHistory
     }
 
     private var activeErrorTitle: String {
-        if scanFilter.errorMessage != nil { return "无法滤波" }
-        if exportError == nil, history.errorMessage != nil, !showsHistory { return "历史记录" }
+        if scanFilter.errorMessage != nil { return String(localized: "Filter Failed") }
+        if isHistoryError { return String(localized: "Scan History") }
         return errorTitle
     }
 
@@ -301,7 +305,7 @@ struct ContentView: View {
                 }
                 .allowsHitTesting(false)
             } else if snapshot == nil, mesh == nil {
-                ProgressView("正在建立点云")
+                ProgressView("Building point cloud…")
                     .font(.system(size: 13))
                     .tint(ScanTheme.canvasAccent)
                     .foregroundStyle(ScanTheme.canvasText)
@@ -309,7 +313,7 @@ struct ContentView: View {
 
             if openingFile {
                 ScanTheme.surface
-                ProgressView(openingHistory ? "正在打开历史…" : "正在打开 PLY…")
+                ProgressView(openingHistory ? String(localized: "Opening scan…") : String(localized: "Opening PLY…"))
                     .font(.system(size: 13))
                     .foregroundStyle(ScanTheme.secondary)
             }
@@ -320,6 +324,7 @@ struct ContentView: View {
                         Circle().fill(ScanTheme.canvasAccent).frame(width: 5, height: 5)
                     }
                     Text(stageLabel)
+                        .fixedSize(horizontal: false, vertical: true)
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(usesCaptureCanvas ? ScanTheme.canvasAccent : ScanTheme.tint)
                     Spacer()
@@ -361,39 +366,39 @@ struct ContentView: View {
     private var stageLabel: String {
         if openingFile { return "" }
         if let importedDocument {
-            return importedDocument.mesh.isSample ? "合成示例 · PLY 点云" : "PLY 点云"
+            return importedDocument.mesh.isSample ? String(localized: "Sample · PLY Point Cloud") : String(localized: "PLY Point Cloud")
         }
-        if originalMesh?.isSample == true || showsLiveSample { return "合成示例 · 非真实扫描" }
-        if isScanning { return "实时点云" }
+        if originalMesh?.isSample == true || showsLiveSample { return String(localized: "Simulated Scan") }
+        if isScanning { return String(localized: "Live Point Cloud") }
         return ""
     }
 
     private var stageHint: String {
-        if importedDocument != nil { return "拖动旋转 · 双指缩放 · 双击重置" }
-        if !hasEnteredCapture { return "点按开始扫描，或打开 PLY 文件" }
-        if showsLiveSample { return "合成点云演示" }
-        if scanner.phase == .ready, scanner.errorMessage == nil { return "正对镜头 · 距离约 30–50 厘米" }
+        if importedDocument != nil { return String(localized: "Drag to rotate · Pinch to zoom · Double-tap to reset") }
+        if !hasEnteredCapture { return String(localized: "Start a scan or open a PLY file.") }
+        if showsLiveSample { return String(localized: "Sample point cloud") }
+        if scanner.phase == .ready, scanner.errorMessage == nil { return String(localized: "Face the camera · Stay 30–50 cm away") }
         return scanner.errorMessage ?? scanner.hint
     }
 
     @ViewBuilder
     private var controls: some View {
         if openingFile {
-            primaryButton("取消打开", symbol: "xmark") { cancelOpeningFile() }
+            primaryButton("Cancel", symbol: "xmark") { cancelOpeningFile() }
         } else if importedDocument != nil {
-            primaryButton("关闭文件", symbol: "xmark") { closeFile() }
+            primaryButton("Close File", symbol: "xmark") { closeFile() }
         } else if !privacy.isAccepted {
-            primaryButton("查看隐私协议", symbol: "hand.raised") { showsPrivacy = true }
+            primaryButton("View Privacy Policy", symbol: "hand.raised") { showsPrivacy = true }
         } else if let mesh {
             VStack(spacing: 10) {
-                ScanPointSizeControl(title: "点大小", scale: $resultPointSizeScale)
+                ScanPointSizeControl(title: "Point Size", scale: $resultPointSizeScale)
                     .frame(minHeight: 38)
 
                 HStack {
                     Button {
                         showsFilterSettings = true
                     } label: {
-                        Label("滤波参数", systemImage: "slider.horizontal.3")
+                        Label("Filter Settings", systemImage: "slider.horizontal.3")
                             .font(.system(size: 14, weight: .medium))
                             .frame(minHeight: 44)
                             .contentShape(Rectangle())
@@ -401,7 +406,7 @@ struct ContentView: View {
                     .buttonStyle(.plain)
                     .disabled(exporting || scanFilter.isFiltering)
                     .accessibilityIdentifier("filter.settings")
-                    .accessibilityHint("调整滤波参数")
+                    .accessibilityHint("Adjust filter settings.")
                     Spacer(minLength: 0)
                 }
 
@@ -410,16 +415,16 @@ struct ContentView: View {
                                            progress: scanFilter.progress,
                                            onApply: applyFilter, onCancel: scanFilter.cancel)
                         .disabled(exporting)
-                    primaryButton(exporting ? "导出中…" : (savedNotice ? "已导出" : "导出"),
+                    primaryButton(exporting ? "Exporting…" : (savedNotice ? "Exported" : "Export"),
                                   symbol: savedNotice ? "checkmark" : "square.and.arrow.up") {
                         export(mesh)
                     }
                     .disabled(exporting || scanFilter.isFiltering)
                     .accessibilityIdentifier("scan.export")
-                    .accessibilityHint(mesh.isFiltered ? "导出当前滤波点云为 PLY" : "导出当前原始点云为 PLY")
+                    .accessibilityHint(Text(mesh.isFiltered ? String(localized: "Export the filtered point cloud as a PLY file.") : String(localized: "Export the original point cloud as a PLY file.")))
                 }
 
-                Button("重新扫描", action: restart)
+                Button("New Scan", action: restart)
                     .font(.system(size: 14, weight: .medium))
                     .foregroundStyle(ScanTheme.secondary)
                     .frame(maxWidth: .infinity, minHeight: 44)
@@ -427,24 +432,26 @@ struct ContentView: View {
                     .accessibilityIdentifier("scan.restart")
             }
         } else if showsLiveSample {
-            primaryButton("结束演示", symbol: "stop.fill") { restart() }
+            primaryButton("End Demo", symbol: "stop.fill") { restart() }
         } else if scanner.phase == .scanning {
-            primaryButton("停止扫描", symbol: "stop.fill") { scanner.finishScan() }
+            primaryButton("Stop Scan", symbol: "stop.fill") { scanner.finishScan() }
         } else if scanner.phase == .processing {
-            ProgressView("正在整理点云…")
+            ProgressView("Finishing scan…")
                 .font(.system(size: 14))
                 .frame(maxWidth: .infinity, minHeight: 56)
         } else {
-            primaryButton(wantsToScan ? "正在准备…" : (scanner.phase == .unavailable ? "重试" : "开始扫描"),
+            primaryButton(wantsToScan ? "Getting ready…" : (scanner.phase == .unavailable ? "Try Again" : "Start Scan"),
                           symbol: "viewfinder", action: beginScan)
                 .disabled(wantsToScan)
         }
     }
 
-    private func primaryButton(_ title: String, symbol: String, action: @escaping () -> Void) -> some View {
+    private func primaryButton(_ title: LocalizedStringKey, symbol: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Label(title, systemImage: symbol)
                 .font(.system(size: 16, weight: .semibold))
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, minHeight: 56)
         }
         .buttonStyle(ScanPrimaryButton())
@@ -478,11 +485,13 @@ struct ContentView: View {
             openHistoryList()
             return
         }
-        if ProcessInfo.processInfo.arguments.contains("--sample") {
+        if ProcessInfo.processInfo.arguments.contains("--sample")
+            || ProcessInfo.processInfo.arguments.contains("--filter-settings-sample") {
             let sample = SampleFaceMesh.make()
             sampleMesh = sample
             finalSnapshot = LivePointCloudSnapshot(revision: 1, vertices: sample.vertices,
                                                    confirmedPointCount: sample.vertexCount, isSample: true)
+            showsFilterSettings = ProcessInfo.processInfo.arguments.contains("--filter-settings-sample")
             return
         }
         if ProcessInfo.processInfo.arguments.contains("--live-sample") {
@@ -583,7 +592,7 @@ struct ContentView: View {
                 else { try? FileManager.default.removeItem(at: url) }
             } catch {
                 if token == exportGeneration {
-                    errorTitle = "无法导出"
+                    errorTitle = String(localized: "Couldn't Export")
                     exportError = error.localizedDescription
                 }
             }
@@ -647,7 +656,7 @@ struct ContentView: View {
                 guard !Task.isCancelled, importGeneration == token else { return }
                 openingFile = false
                 importTask = nil
-                errorTitle = "无法打开 PLY"
+                errorTitle = String(localized: "Couldn't Open PLY")
                 exportError = error.localizedDescription
                 if importedDocument == nil { restoreCapture() }
             }
@@ -718,7 +727,7 @@ struct ContentView: View {
                 openingFile = false
                 openingHistory = false
                 importTask = nil
-                errorTitle = "无法打开历史"
+                errorTitle = String(localized: "Couldn't Open Scan")
                 exportError = error.localizedDescription
                 restoreCapture()
             }

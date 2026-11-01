@@ -90,11 +90,11 @@ public enum FaceCloudProcessingError: Error, Sendable, LocalizedError {
     case noSupportedPoints
     public var errorDescription: String? {
         switch self {
-        case .invalidConfiguration(let message): return "无效处理参数：" + message
-        case .invalidCoordinate(let i): return "第 \(i) 个点坐标无效；请使用有限的米制坐标。"
-        case .tooFewPoints(let required, let actual): return "至少需要 \(required) 个点，当前 \(actual) 个。"
-        case .gridTooLarge: return "柱面栅格过大；请检查米/毫米单位、人脸局部坐标及参数。"
-        case .noSupportedPoints: return "没有符合单层表面模型的点。"
+        case .invalidConfiguration(let message): return String(localized: "Invalid filter settings: \(message)")
+        case .invalidCoordinate(let i): return String(localized: "Point \(i) has invalid coordinates. Use finite coordinates in meters.")
+        case .tooFewPoints(let required, let actual): return String(localized: "Not enough points to filter. Required: \(required); available: \(actual).")
+        case .gridTooLarge: return String(localized: "The cylindrical grid is too large. Check the units, face-local coordinates, and filter settings.")
+        case .noSupportedPoints: return String(localized: "No usable points remain after filtering. Adjust the filter settings and try again.")
         }
     }
 }
@@ -474,7 +474,7 @@ public enum FacePointCloudProcessor: Sendable {
               (0...32).contains(p.bilateralIterations), (0...15).contains(p.bilateralHalfWindow),
               (0...15).contains(p.colorHalfWindow), (1...2_000_000).contains(p.maximumGridCells),
               p.smoothingCurve?.isValid ?? true else {
-            throw FaceCloudProcessingError.invalidConfiguration("尺寸、sigma、邻点数或窗口范围不合法")
+            throw FaceCloudProcessingError.invalidConfiguration(String(localized: "One or more filter values are outside the allowed range."))
         }
     }
 }

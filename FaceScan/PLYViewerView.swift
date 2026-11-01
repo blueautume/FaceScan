@@ -69,7 +69,7 @@ struct PLYViewerView: UIViewRepresentable {
             SCNTransaction.disableActions = true
             pointNode.geometry = cloud?.geometry
             SCNTransaction.commit()
-            view.accessibilityLabel = "PLY 点云，\(cloud?.pointCount ?? 0) 个点，可旋转和缩放"
+            view.accessibilityLabel = String(localized: "PLY point cloud. \(L10n.pointCount(cloud?.pointCount ?? 0)). Drag to rotate and pinch to zoom.")
             view.defaultCameraController.stopInertia()
             if let preview = view as? PLYPointCloudSceneView {
                 preview.fitCameraNode = cameraNode

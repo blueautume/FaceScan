@@ -21,9 +21,9 @@ enum ScanHistoryThumbnailRenderer {
 
         var errorDescription: String? {
             switch self {
-            case .noRenderablePoints: "这份扫描没有可以生成预览的有效点。"
-            case .tooManyPoints: "这份扫描的点数超出预览范围。"
-            case .cannotEncode: "暂时无法生成点云预览图。"
+            case .noRenderablePoints: String(localized: "This scan has no valid points for a preview.")
+            case .tooManyPoints: String(localized: "This scan has too many points to generate a preview.")
+            case .cannotEncode: String(localized: "Couldn't generate a point cloud preview.")
             }
         }
     }

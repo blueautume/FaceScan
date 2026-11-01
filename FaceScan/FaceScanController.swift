@@ -17,9 +17,9 @@ enum ScanPhase {
 @MainActor
 final class FaceScanController: NSObject, ObservableObject {
     @Published var phase: ScanPhase = .idle
-    @Published var hint = "准备前置原深感摄像头"
+    @Published var hint = String(localized: "Preparing the TrueDepth camera")
     @Published var progress = ScanProgress(
-        acceptedFrames: 0, vertexCount: 0, coveredAngles: [], hint: "请正对镜头"
+        acceptedFrames: 0, vertexCount: 0, coveredAngles: [], hint: String(localized: "Face the camera")
     )
     @Published var result: ScanMesh?
     @Published var errorMessage: String?
@@ -84,11 +84,11 @@ final class FaceScanController: NSObject, ObservableObject {
         // Face tracking may also work on RGB-only hardware. Require a real
         // TrueDepth device separately so this demo never substitutes a fitted mesh.
         guard AVCaptureDevice.default(.builtInTrueDepthCamera, for: .video, position: .front) != nil else {
-            unavailable("需要配备前置原深感摄像头的 iPhone。")
+            unavailable(String(localized: "Scanning requires an iPhone with a front TrueDepth camera."))
             return
         }
         guard ARFaceTrackingConfiguration.isSupported else {
-            unavailable("此设备当前不支持 ARKit 人脸追踪。请在支持原深感的 iPhone 真机上运行。")
+            unavailable(String(localized: "Face tracking isn't supported on this device. Use an iPhone with a TrueDepth camera."))
             return
         }
 
@@ -97,7 +97,7 @@ final class FaceScanController: NSObject, ObservableObject {
             runSession()
         case .notDetermined:
             isRequestingPermission = true
-            hint = "请允许相机权限，所有扫描数据仅在本机处理"
+            hint = String(localized: "Allow camera access for on-device scanning")
             let permissionGeneration = generation
             AVCaptureDevice.requestAccess(for: .video) { [weak self] allowed in
                 Task { @MainActor [weak self] in
@@ -112,16 +112,16 @@ final class FaceScanController: NSObject, ObservableObject {
                             self.runSession()
                         }
                     } else {
-                        self.unavailable("未获得相机权限。请前往系统设置，允许本 App 使用相机后重试。")
+                        self.unavailable(String(localized: "Camera access wasn't granted. Allow it in Settings and try again."))
                     }
                 }
             }
         case .denied:
-            unavailable("相机权限已关闭。请前往系统设置，允许本 App 使用相机后重试。")
+            unavailable(String(localized: "Camera access is off. Allow it in Settings and try again."))
         case .restricted:
-            unavailable("相机访问受到系统限制，请检查设备的屏幕使用时间或管理策略。")
+            unavailable(String(localized: "Camera access is restricted. Check Screen Time or your device's management settings."))
         @unknown default:
-            unavailable("无法确认相机权限，请检查系统设置后重试。")
+            unavailable(String(localized: "Couldn't check camera access. Check Settings and try again."))
         }
     }
 
@@ -133,14 +133,14 @@ final class FaceScanController: NSObject, ObservableObject {
         errorMessage = nil
         progress = Self.emptyProgress
         phase = .scanning
-        hint = "缓慢转头，再轻轻低头、抬头"
+        hint = String(localized: "Turn slowly, then tilt your head down and up")
         worker.begin(generation: generation)
     }
 
     func finishScan() {
         guard phase == .scanning else { return }
         phase = .processing
-        hint = "正在整理点云…"
+        hint = String(localized: "Preparing point cloud…")
         worker.finish(generation: generation)
     }
 
@@ -193,7 +193,7 @@ final class FaceScanController: NSObject, ObservableObject {
         progress = Self.emptyProgress
         errorMessage = nil
         phase = .idle
-        hint = "相机已暂停"
+        hint = String(localized: "Camera paused")
     }
 
     private func runSession() {
@@ -211,7 +211,7 @@ final class FaceScanController: NSObject, ObservableObject {
         isSessionRunning = true
         isInterrupted = false
         phase = .ready
-        hint = "将整张脸放入画面，正对镜头后开始扫描"
+        hint = String(localized: "Center your face and look at the camera")
     }
 
     private func receive(_ event: FaceScanWorker.Event) {
@@ -246,7 +246,7 @@ final class FaceScanController: NSObject, ObservableObject {
             livePointCloud = nil
             phase = .ready
             errorMessage = message
-            hint = "请正对镜头，重新开始扫描"
+            hint = String(localized: "Face the camera and start a new scan")
         case .restartRequired(let message):
             guard phase == .scanning || phase == .processing else { return }
             generation = UUID()
@@ -255,7 +255,7 @@ final class FaceScanController: NSObject, ObservableObject {
             livePointCloud = nil
             phase = .ready
             errorMessage = message
-            hint = "请回到正面，重新开始；缓慢转头并保持人脸在画面内"
+            hint = String(localized: "Face forward and restart. Turn slowly and stay in view.")
         case .failed(let message):
             guard phase != .complete else { return }
             unavailable(message)
@@ -268,7 +268,7 @@ final class FaceScanController: NSObject, ObservableObject {
             progress = Self.emptyProgress
             livePointCloud = nil
             phase = .ready
-            hint = "相机被系统中断，恢复后请重新开始扫描"
+            hint = String(localized: "Camera interrupted. Start a new scan.")
         case .interruptionEnded:
             break
         }
@@ -283,7 +283,7 @@ final class FaceScanController: NSObject, ObservableObject {
             revision: mesh.frameCount + 1, vertices: mesh.vertices,
             confirmedPointCount: mesh.vertexCount)
         phase = .complete
-        hint = "拖动旋转 · 双指缩放"
+        hint = String(localized: "Drag to rotate · Pinch to zoom")
         isSessionRunning = false
         isInterrupted = false
         session.pause()
@@ -313,11 +313,11 @@ final class FaceScanController: NSObject, ObservableObject {
         progress = Self.emptyProgress
         livePointCloud = nil
         phase = .ready
-        hint = "扫描因切换到后台而暂停，返回后请重新开始"
+        hint = String(localized: "Scan paused in the background. Start a new scan.")
     }
 
     private static var emptyProgress: ScanProgress {
-        ScanProgress(acceptedFrames: 0, vertexCount: 0, coveredAngles: [], hint: "请正对镜头")
+        ScanProgress(acceptedFrames: 0, vertexCount: 0, coveredAngles: [], hint: String(localized: "Face the camera"))
     }
 }
 
@@ -362,7 +362,7 @@ private final class FaceScanWorker: NSObject, ARSessionDelegate {
     private var lastPreviewAcceptedFrames = 0
     private var previewDeliveryPending = false
     private var lastProgress = ScanProgress(
-        acceptedFrames: 0, vertexCount: 0, coveredAngles: [], hint: "请正对镜头"
+        acceptedFrames: 0, vertexCount: 0, coveredAngles: [], hint: String(localized: "Face the camera")
     )
 
     func configure(generation: UUID) {
@@ -386,7 +386,7 @@ private final class FaceScanWorker: NSObject, ARSessionDelegate {
             guard generation == self.generation, collecting else { return }
             collecting = false
             guard lastProgress.acceptedFrames >= Self.minimumFrameCount else {
-                emit(.finishRejected("有效深度不足，请正对镜头保持片刻后重新扫描。"))
+                emit(.finishRejected(String(localized: "Not enough depth data. Face the camera, hold still briefly, then scan again.")))
                 return
             }
             guard let mesh = reconstructor.makeMesh(),
@@ -396,7 +396,7 @@ private final class FaceScanWorker: NSObject, ARSessionDelegate {
                       $0.position.x.isFinite && $0.position.y.isFinite && $0.position.z.isFinite
                   }),
                   mesh.triangleIndices.allSatisfy({ Int($0) < mesh.vertices.count }) else {
-                emit(.finishRejected("有效点云不足，请保持自然表情和适当距离后重新扫描。"))
+                emit(.finishRejected(String(localized: "Not enough scan points. Relax your expression, check your distance, and scan again.")))
                 return
             }
             collecting = false
@@ -415,29 +415,29 @@ private final class FaceScanWorker: NSObject, ARSessionDelegate {
         // tracking state is not a valid substitute for ARFaceAnchor.isTracked.
         guard let face = frame.anchors.compactMap({ $0 as? ARFaceAnchor }).first,
               face.isTracked else {
-            guidance("未检测到稳定人脸，请让整张脸进入画面并改善光线", timestamp: frame.timestamp)
+            guidance(String(localized: "Center your face and improve the lighting"), timestamp: frame.timestamp)
             return
         }
         guard frame.capturedDepthData != nil else {
-            guidance("等待原深感深度数据，请保持正对镜头；持续无数据时请重新扫描", timestamp: frame.timestamp)
+            guidance(String(localized: "Waiting for depth. Face forward; restart if needed."), timestamp: frame.timestamp)
             return
         }
         let depthTimestamp = frame.capturedDepthDataTimestamp
         guard depthTimestamp > lastDepthTimestamp,
               abs(frame.timestamp - depthTimestamp) <= 0.15 else {
-            guidance("等待同步的彩色与深度画面，请保持手机稳定", timestamp: frame.timestamp)
+            guidance(String(localized: "Keep the phone steady while depth and color data synchronize."), timestamp: frame.timestamp)
             return
         }
         lastProcessedTimestamp = frame.timestamp
         lastDepthTimestamp = depthTimestamp
         guard collecting else {
-            guidance("已检测到人脸与真实深度，可开始扫描", timestamp: frame.timestamp)
+            guidance(String(localized: "Face and depth detected. Ready to scan."), timestamp: frame.timestamp)
             return
         }
         lastProgress = reconstructor.integrate(frame: frame, face: face)
         if lastProgress.requiresRestart {
             collecting = false
-            emit(.restartRequired("人脸追踪已切换，本轮已重置，避免把不同坐标的面部混在一起。请回正并重新开始。"))
+            emit(.restartRequired(String(localized: "Face tracking changed, so this scan was reset. Face the camera and start again.")))
             return
         }
         emit(.progress(lastProgress))
@@ -456,7 +456,7 @@ private final class FaceScanWorker: NSObject, ARSessionDelegate {
 
     func session(_ session: ARSession, didFailWithError error: Error) {
         collecting = false
-        emit(.failed("原深感采集失败：\(error.localizedDescription)。请确认相机未被其他 App 占用，再重试。"))
+        emit(.failed(String(localized: "TrueDepth capture failed: \(error.localizedDescription)\nClose any other app using the camera, then try again.")))
     }
 
     func sessionWasInterrupted(_ session: ARSession) {
@@ -478,7 +478,7 @@ private final class FaceScanWorker: NSObject, ARSessionDelegate {
         lastPreviewAcceptedFrames = 0
         previewDeliveryPending = false
         lastProgress = ScanProgress(
-            acceptedFrames: 0, vertexCount: 0, coveredAngles: [], hint: "请正对镜头"
+            acceptedFrames: 0, vertexCount: 0, coveredAngles: [], hint: String(localized: "Face the camera")
         )
     }
 
